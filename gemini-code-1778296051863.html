@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="theme-color" content="#06091a"/>
+<title>BuzzStock MASTER</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Outfit:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#06091a;--s1:#0c1226;--s2:#111c36;--s3:#172342;--br:#1c2d4a;--br2:#263f66;--ac:#00c8ff;--acg:rgba(0,200,255,.11);--go:#f59e0b;--gog:rgba(245,158,11,.11);--gr:#0ece87;--grg:rgba(14,206,135,.1);--re:#f43f5e;--reg:rgba(244,63,94,.1);--t1:#dde5f6;--t2:#7994bc;--t3:#3b5070;--r:10px;}
+html,body,#root{min-height:100vh;background:var(--bg);color:var(--t1);font-family:'Outfit',sans-serif;font-size:15px;-webkit-font-smoothing:antialiased;overscroll-behavior:none;}
+button,input{font-family:'Outfit',sans-serif;cursor:pointer;border:none;outline:none;background:none;-webkit-tap-highlight-color:transparent;}
+.sc{overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}.sc::-webkit-scrollbar{display:none}
+.dot{background-color:var(--bg);background-image:radial-gradient(circle,#1c2d4a 1px,transparent 1px);background-size:26px 26px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+const FINNHUB_KEY = 'd7taikhr01qugn09v5tgd7taikhr01qugn09v5u0';
+const FINNHUB = 'https://finnhub.io/api/v1';
+const REFRESH_SEC = 60;
+const DEFAULT_WATCHLIST = ['NVDA','AAPL','TSLA','AMD','META','MSFT','PLTR','AMZN','GOOGL','GME'];
+
+async function fhGet(path){
+  const sep=path.includes('?')?'&':'?';
+  const r=await fetch(`${FINNHUB}${path}${sep}token=${FINNHUB_KEY}`);
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+async function fetchSocialTrending(){
+  try{
+    const r=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent('https://api.stocktwits.com/api/2/trending/symbols.json')}`,{signal:AbortSignal.timeout(7000)});
+    const data=await r.json();
+    return (data.symbols||[]).filter(s=>s.symbol&&/^[A-Z]{1,5}$/.test(s.symbol)).slice(0,15).map(s=>({ticker:s.symbol,mentions:s.watchlist_count||0}));
+  }catch(e){return null;}
+}
+
+async function fetchApeTrending(asset){
+  try{
+    const filter=asset==='Crypto'?'all-crypto':'all-stocks';
+    const r=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(`https://apewisdom.io/api/v1.0/filter/${filter}/page/1`)}`,{signal:AbortSignal.timeout(7000)});
+    const data=await r.json();
+    return (data.results||[]).slice(0,15).map(s=>({ticker:s.ticker,mentions:s.mentions||0}));
+  }catch(e){return null;}
+}
+
+async function fetchCryptoData(ticker){
+  try{
+    const r=await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ticker.toLowerCase()}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true&include_24hr_change=true`,{signal:AbortSignal.timeout(5000)});
+    const data=await r.json();
+    const c=data[ticker.toLowerCase()];
+    return {price:c.usd||0,marketCap:c.usd_market_cap||0,change24h:c.usd_24h_change||0,volume24h:c.usd_24h_vol||0};
+  }catch(e){return {price:0,marketCap:0,change24h:0,volume24h:0};}
+}
+
+async function fetchStock(ticker){
+  const [q,p,m]=await Promise.allSettled([fhGet(`/quote?symbol=${ticker}`),fhGet(`/stock/profile2?symbol=${ticker}`),fhGet(`/stock/metric?symbol=${ticker}&metric=all`)]);
+  return {q:q.status==='fulfilled'?q.value:{},p:p.status==='fulfilled'?p.value:{},m:m.status==='fulfilled'?(m.value?.metric||{}):{}};
+}
+
+function calcPillars(m){
+  const fcfTotal=(m.freeCashFlowPerShareTTM||0)*(m.shareOutstanding||0);
+  const pFcf=fcfTotal>0?(m.marketCapitalization||0)/fcfTotal:999;
+  const checks=[
+    {name:'P/E Ratio < 22.5',passed:(m.peBasicExclExtraTTM||999)>0&&(m.peBasicExclExtraTTM||999)<22.5,value:m.peBasicExclExtraTTM?m.peBasicExclExtraTTM.toFixed(1)+'x':'—'},
+    {name:'ROIC > 10%',passed:(m.roicAnnual||0)>10,value:`${(m.roicAnnual||0).toFixed(1)}%`},
+    {name:'Revenue Growth',passed:(m.revenueGrowthQuarterlyYoy||0)>5,value:`${(m.revenueGrowthQuarterlyYoy||0).toFixed(1)}%`},
+    {name:'EPS Positive',passed:(m.epsBasicExclExtraItemsTTM||0)>0,value:m.epsBasicExclExtraItemsTTM?`$${m.epsBasicExclExtraItemsTTM.toFixed(2)}`:'—'},
+    {name:'Free Cash Flow',passed:(m.freeCashFlowPerShareTTM||0)>0,value:`$${(m.freeCashFlowPerShareTTM||0).toFixed(2)}/sh`},
+    {name:'Debt / Equity',passed:((m.totalDebt||0)/Math.max((m.bookValuePerShareAnnual||1)*(m.shareOutstanding||1),1))<1.5,value:`${((m.totalDebt||0)/Math.max((m.bookValuePerShareAnnual||1)*(m.shareOutstanding||1),1)).toFixed(2)}x`},
+    {name:'Gross Margin',passed:(m.grossMarginAnnual||0)>40,value:`${(m.grossMarginAnnual||0).toFixed(1)}%`},
+    {name:'Price / FCF < 20',passed:pFcf<20,value:pFcf<900?pFcf.toFixed(1)+'x':'N/A'}
+  ];
+  return {pillars:checks,totalScore:checks.filter(c=>c.passed).length};
+}
+
+function calcDCF(m,price){
+  if(!price||!m.shareOutstanding) return {intrinsic:0,upside:0,rating:'N/A',wacc:10,revGrowth:0,fcfMargin:0};
+  const beta=m.beta||1.2, wacc=Math.max(7.0,parseFloat((4.5+beta*5.5).toFixed(1)));
+  const revG=Math.min(Math.max(m.revenueGrowthQuarterlyYoy||5,-20),35), fcfM=Math.min(Math.max(m.freeCashFlowMarginAnnual||m.netProfitMarginAnnual||10,-50),80);
+  const revB=(m.revenuePerShareTTM||0)*(m.shareOutstanding||1)/1e3;
+  let fcf=revB*(fcfM/100),v=0;
+  for(let yr=1;yr<=5;yr++){ fcf*=(1+Math.max((revG/100)*(1-yr*0.1),0.01)); v+=fcf/Math.pow(1+wacc/100,yr); }
+  const tv=(fcf*(1+0.02))/Math.max(0.02,(wacc/100)-0.02);
+  v+=tv/Math.pow(1+wacc/100,5);
+  const intr=parseFloat((v*1000/m.shareOutstanding).toFixed(2)), up=parseFloat(((intr-price)/price*100).toFixed(1));
+  return {intrinsic:intr,upside:up,rating:up>15?'UNDERVALUED':up<-15?'OVERVALUED':'FAIR VALUE',wacc,revGrowth:parseFloat(revG.toFixed(1)),fcfMargin:parseFloat(fcfM.toFixed(1))};
+}
+
+function calcFlags(m){
+  const f=[],p=[];
+  const de=(m.totalDebt||0)/Math.max((m.bookValuePerShareAnnual||1)*(m.shareOutstanding||1),1);
+  if((m.revenueGrowthQuarterlyYoy||0)<0)f.push({title:'Revenue Declining',detail:`Down ${Math.abs(m.revenueGrowthQuarterlyYoy||0).toFixed(1)}% YoY.`});
+  if((m.freeCashFlowPerShareTTM||0)<0)f.push({title:'Negative FCF',detail:`FCF/sh $${(m.freeCashFlowPerShareTTM||0).toFixed(2)}.`});
+  if(de>2)f.push({title:'High Leverage',detail:`D/E ${de.toFixed(2)}x.`});
+  if((m.netProfitMarginAnnual||0)<0)f.push({title:'Unprofitable',detail:`Net margin ${(m.netProfitMarginAnnual||0).toFixed(1)}%.`});
+  if(!f.length) p.push({title:'Clean Fundamentals',detail:'No major red flags identified.'});
+  return{flags:f,positives:p,riskLevel:f.length>2?'HIGH':f.length>0?'MEDIUM':'LOW'};
+}
+
+function buildStock(ticker,rank,q,p,m){
+  const price=q.c||q.pc||0;
+  const pd=calcPillars(m), dd=calcDCF(m,price);
+  const mcv=m.marketCapitalization||0, mc=mcv>=1e6?`$${(mcv/1e6).toFixed(2)}T`:mcv>=1e3?`$${(mcv/1e3).toFixed(1)}B`:mcv?`$${mcv.toFixed(0)}M`:'—';
+  return {rank,ticker,name:p.name||ticker,sector:p.finnhubIndustry||'Unknown',price,chg:q.d||0,pct:q.dp||0,mc,pe:m.peBasicExclExtraTTM?m.peBasicExclExtraTTM.toFixed(1):'—',eps:m.epsBasicExclExtraItemsTTM?`$${m.epsBasicExclExtraItemsTTM.toFixed(2)}`:'—',rev:m.revenuePerShareTTM?`$${((m.revenuePerShareTTM*(m.shareOutstanding||0))/1e9).toFixed(1)}B`:'—',gm:m.grossMarginAnnual?`${m.grossMarginAnnual.toFixed(1)}%`:'—',beta:m.beta?m.beta.toFixed(2):'—',div:m.dividendYieldIndicatedAnnual?`${m.dividendYieldIndicatedAnnual.toFixed(2)}%`:'—',pillarsScore:`${pd.totalScore}/8`,dcfUpside:dd.upside,_m:m};
+}
+
+const SH=({label,color})=><div style={{fontSize:10,color:color||'var(--t3)',fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.09em',marginBottom:10}}>{label}</div>;
+const Card=({children,accent,style:s})=><div style={{background:'var(--s1)',border:`1px solid ${accent?accent+'33':'var(--br)'}`,borderRadius:'var(--r)',padding:'13px 15px',...s}}>{children}</div>;
+const Spin=({label})=><div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'48px 0',gap:14}}><div style={{width:28,height:28,border:'2px solid var(--br2)',borderTopColor:'var(--ac)',borderRadius:'50%',animation:'spin .8s linear infinite'}}/><div style={{fontSize:11,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>{label||'Loading...'}</div></div>;
+
+const RadarChart=({scores,size=160})=>{
+  const c=size/2,r=size/2-20, axes=['VALUATION','GROWTH','HEALTH','PAST','DIVIDEND'];
+  const vals=[scores.valuation||50,scores.growth||50,scores.health||50,scores.past||50,scores.dividend||50];
+  const poly=vals.map((v,i)=>{const a=(i*72-90)*Math.PI/180;return [c+Math.cos(a)*(v/100)*r,c+Math.sin(a)*(v/100)*r].join(',');}).join(' ');
+  return <svg viewBox={`0 0 ${size} ${size}`} style={{width:'100%',filter:'drop-shadow(0 0 8px rgba(0,200,255,0.3))'}}>
+    {[25,50,75,100].map(p=><circle key={p} cx={c} cy={c} r={(p/100)*r} fill="none" stroke="var(--br)" strokeWidth="0.5"/>)}
+    {axes.map((lbl,i)=>{const a=(i*72-90)*Math.PI/180;return <text key={lbl} x={c+Math.cos(a)*(r+14)} y={c+Math.sin(a)*(r+14)} textAnchor="middle" fontSize="9" fill="var(--t3)" fontWeight="700">{lbl}</text>;})}
+    <polygon points={poly} fill="var(--ac)" fillOpacity="0.3" stroke="var(--ac)" strokeWidth="2"/>
+  </svg>;
+};
+
+function Detail({stock,onBack}){
+  const [tab,setTab]=useState('overview');
+  const tabs=[{id:'overview',label:'Overview'},{id:'redflags',label:'🚩 Flags'},{id:'dcf',label:'DCF'},{id:'pillars',label:'🏛 Pillars'},{id:'f13',label:'13F'},{id:'financials',label:'Financials'},{id:'tenq',label:'📄 10-Q'}];
+  const m=stock._m; const dcf=calcDCF(m,stock.price); const rf=calcFlags(m);
+  return <div style={{minHeight:'100vh',background:'var(--bg)',animation:'fadeIn .3s ease'}}>
+    <div style={{padding:14,borderBottom:'1px solid var(--br)'}}><button onClick={onBack} style={{color:'var(--t2)',marginBottom:10,background:'var(--s2)',padding:'4px 10px',borderRadius:6,border:'1px solid var(--br)'}}>← BACK</button><div style={{fontSize:22,fontWeight:800}}>{stock.ticker} <span style={{fontSize:12,color:'var(--t3)'}}>{stock.name}</span></div><div style={{fontSize:26,fontWeight:700,marginTop:8}}>${stock.price.toFixed(2)}</div></div>
+    <div className="sc" style={{display:'flex',padding:'0 14px',borderBottom:'1px solid var(--br)',overflowX:'auto',whiteSpace:'nowrap'}}>{tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flexShrink:0,padding:'12px 10px',fontSize:10,fontWeight:700,color:tab===t.id?'var(--ac)':'var(--t3)',borderBottom:tab===t.id?'2px solid var(--ac)':'none'}}>{t.label.toUpperCase()}</button>)}</div>
+    <div style={{padding:14}}>
+      {tab==='overview'&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>{[['Market Cap',stock.mc],['P/E',stock.pe],['EPS',stock.eps],['Revenue',stock.rev],['Beta',stock.beta],['Div Yield',stock.div]].map(([l,v])=><Card key={l}><SH label={l.toUpperCase()}/><div style={{fontFamily:"'Space Mono',monospace",fontSize:13,fontWeight:700}}>{v||'—'}</div></Card>)}</div>}
+      {tab==='redflags'&&<div><Card style={{marginBottom:8,textAlign:'center',border:`1px solid ${rf.riskLevel==='HIGH'?'var(--re)':'var(--gr)'}44`}}><SH label="RISK LEVEL"/><div style={{fontSize:24,fontWeight:800,color:rf.riskLevel==='HIGH'?'var(--re)':'var(--gr)'}}>{rf.riskLevel}</div></Card>
+        <Card style={{marginBottom:8}}><SH label="🚩 RED FLAGS"/>{rf.flags.map((f,i)=><div key={i} style={{fontSize:12,color:'var(--re)',marginBottom:4}}>• {f.title}: {f.detail}</div>)}{!rf.flags.length&&<div style={{fontSize:12,color:'var(--t3)'}}>No flags.</div>}</Card>
+        <Card><SH label="✅ POSITIVES"/>{rf.positives.map((p,i)=><div key={i} style={{fontSize:12,color:'var(--gr)',marginBottom:4}}>• {p.title}: {p.detail}</div>)}</Card></div>}
+      {tab==='dcf'&&<div><Card style={{textAlign:'center',marginBottom:10,background:dcf.upside>0?'var(--grg)':'var(--reg)'}}><SH label="VALUATION VERDICT"/><div style={{fontSize:32,fontWeight:800}}>{Math.abs(dcf.upside)}%</div><div style={{fontSize:12}}>{dcf.rating}</div></Card>
+        <div style={{position:'relative',height:20,background:'var(--s3)',borderRadius:10,overflow:'hidden',marginBottom:10}}><div style={{position:'absolute',left:0,top:0,height:'100%',width:`${Math.min(Math.max(50+dcf.upside/2,5),95)}%`,background:dcf.upside>0?'var(--gr)':'var(--re)'}}/></div>
+        <Card><SH label="ASSUMPTIONS"/><div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>{[['Fair Value','$'+dcf.intrinsic],['WACC',dcf.wacc+'%'],['Growth',dcf.revGrowth+'%'],['FCF Margin',dcf.fcfMargin+'%']].map(([k,v])=><div key={k}><div style={{fontSize:9,color:'var(--t3)'}}>{k}</div><div style={{fontWeight:700}}>{v}</div></div>)}</div></Card></div>}
+      {tab==='pillars'&&<PlTab stock={stock}/>}{tab==='f13'&&<F13Tab stock={stock}/>}
+      {tab==='financials'&&<Card><SH label="RESOURCES"/><a href={`https://stockanalysis.com/stocks/${stock.ticker.toLowerCase()}/financials/`} target="_blank" style={{display:'block',color:'var(--ac)',marginBottom:10}}>Full Income Statement →</a><a href={`https://www.macrotrends.net/stocks/charts/${stock.ticker}/stock/revenue`} target="_blank" style={{color:'var(--ac)'}}>MacroTrends History →</a></Card>}
+      {tab==='tenq'&&<Card style={{textAlign:'center'}}><SH label="SEC FILINGS"/><a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=10-Q`} target="_blank" style={{color:'var(--ac)',fontWeight:700}}>View latest 10-Q on SEC.gov →</a></Card>}
+    </div>
+  </div>;
+}
+
+function PlTab({stock}){
+  const d=calcPillars(stock._m);
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <Card style={{marginBottom:8,textAlign:'center'}}><SH label="SWS QUALITY SNOWFLAKE"/><div style={{width:160,margin:'0 auto'}}><RadarChart scores={{valuation:d.totalScore*10,growth:50,health:d.totalScore*12,past:50,dividend:50}} size={160}/></div></Card>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>{d.pillars.map((p,i)=><div key={i} style={{background:'var(--s1)',borderLeft:`3px solid ${p.passed?'var(--gr)':'var(--re)'}`,borderRadius:8,padding:10}}><div style={{fontSize:10,fontWeight:700}}>{p.name}</div><div style={{fontSize:11,color:p.passed?'var(--gr)':'var(--re)'}}>{p.value}</div></div>)}</div>
+  </div>;
+}
+
+function F13Tab({stock}){
+  const [data,setData]=useState(null), [ld,setLd]=useState(true);
+  useEffect(()=>{ fhGet(`/stock/institutional-ownership?symbol=${stock.ticker}`).then(r=>{ const h=(r.ownership||[]).slice(0,8); setData({holders:h, net:h.reduce((a,x)=>a+(x.change||0),0)}); }).catch(()=>setData(null)).finally(()=>setLd(false)); },[stock.ticker]);
+  if(ld) return <Spin/>;
+  if(!data||!data.holders.length) return <Card style={{textAlign:'center'}}><SH label="13F DATA"/><div style={{fontSize:12,color:'var(--t3)'}}>Not available on free Finnhub tier.</div></Card>;
+  return <div style={{animation:'fadeUp .3s ease'}}><Card accent={data.net>0?'var(--gr)':'var(--re)'} style={{textAlign:'center',marginBottom:8}}><SH label="SIGNAL"/><div style={{fontSize:24,fontWeight:800,color:data.net>0?'var(--gr)':'var(--re)'}}>{data.net>0?'ACCUMULATING':'DISTRIBUTING'}</div></Card>
+    <Card><SH label="TOP HOLDERS"/>{data.holders.map((h,i)=><div key={i} style={{marginBottom:8,borderBottom:'1px solid var(--br)',paddingBottom:4}}><div style={{fontSize:12,fontWeight:600}}>{h.name}</div><div style={{fontSize:10,color:h.change>0?'var(--gr)':'var(--re)'}}>{h.change>0?'+':''}{(h.change/1e6).toFixed(1)}M shares</div></div>)}</Card></div>;
+}
+
+function App(){
+  const [stocks,setStocks]=useState([]), [loading,setLoading]=useState(true), [stock,setStock]=useState(null), [asset,setAsset]=useState('Stocks'), [source,setSource]=useState('StockTwits');
+  const loadAll=useCallback(async()=>{
+    setLoading(true); let t=[];
+    if(source==='StockTwits') t=await fetchSocialTrending(); else t=await fetchApeTrending(asset);
+    if(!t) t=asset==='Stocks'?DEFAULT_WATCHLIST.map(x=>({ticker:x,mentions:0})):[];
+    if(asset==='Crypto'){
+      const res=await Promise.allSettled(t.map(x=>fetchCryptoData(x.ticker)));
+      setStocks(res.map((r,i)=>r.status==='fulfilled'&&r.value.price?{...r.value,ticker:t[i].ticker,name:t[i].ticker.toUpperCase(),mentions:t[i].mentions,isCrypto:true}:null).filter(Boolean));
+    } else {
+      const res=await Promise.allSettled(t.map(x=>fetchStock(x.ticker)));
+      setStocks(res.map((r,i)=>r.status==='fulfilled'&&r.value.q.c?buildStock(t[i].ticker,i+1,r.value.q,r.value.p,r.value.m):null).filter(Boolean).sort((a,b)=>b.mentions-a.mentions).map((s,i)=>({...s,rank:i+1})));
+    }
+    setLoading(false);
+  },[source,asset]);
+  useEffect(()=>{loadAll();},[loadAll]);
+  if(stock) return <Detail stock={stock} onBack={()=>setStock(null)}/>;
+  return <div className="dot" style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+    <div style={{padding:14,borderBottom:'1px solid var(--br)',background:'linear-gradient(180deg,rgba(0,200,255,.06) 0%,transparent 100%)'}}>
+      <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:12}}><div style={{width:32,height:32,borderRadius:8,background:'var(--ac)',color:'#000',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800}}>B</div><div style={{fontWeight:700,fontSize:17}}>buzz<span style={{color:'var(--ac)'}}>stock</span></div></div>
+      <div style={{display:'flex',gap:8,marginBottom:8}}>{['Stocks','Crypto'].map(a=><button key={a} onClick={()=>setAsset(a)} style={{flex:1,padding:8,borderRadius:8,fontSize:11,fontWeight:700,background:asset===a?'var(--ac)':'var(--s2)',color:asset===a?'#000':'var(--t2)',border:'1px solid var(--br)'}}>{a}</button>)}</div>
+      <div style={{display:'flex',gap:8}}>{['StockTwits','Ape'].map(s=><button key={s} onClick={()=>setSource(s)} style={{flex:1,padding:8,borderRadius:8,fontSize:11,fontWeight:700,background:source===s?'var(--go)':'var(--s2)',color:source===s?'#000':'var(--t2)',border:'1px solid var(--br)'}}>{s}</button>)}</div>
+    </div>
+    <div style={{padding:14,flex:1}}>{loading?<Spin/>:stocks.map((s,i)=><div key={i} onClick={()=>setStock(s)} style={{padding:15,background:'var(--s1)',borderRadius:10,marginBottom:8,border:'1px solid var(--br)'}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><b>{s.ticker}</b><span>${s.price.toFixed(2)}</span></div><div style={{fontSize:10,color:'var(--t3)'}}>{s.sector||'Crypto'} · Rank #{i+1}</div></div>)}</div>
+  </div>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
