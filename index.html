@@ -2,108 +2,862 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>BuzzStock DEBUG</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="BuzzStock"/>
+<meta name="theme-color" content="#06091a"/>
+<title>BuzzStock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Outfit:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#06091a;color:#dde5f6;font-family:'Outfit',sans-serif;font-size:14px}
-.container{padding:20px;max-width:600px;margin:0 auto}
-.card{background:#0c1226;border:1px solid #1c2d4a;border-radius:10px;padding:15px;margin-bottom:15px}
-.metric{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
-.label{font-size:10px;color:#3b5070;text-transform:uppercase;font-weight:700}
-.value{font-size:14px;font-weight:700;font-family:'Space Mono',monospace}
-.ok{color:#0ece87}.bad{color:#f43f5e}.na{color:#7994bc}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#06091a;--s1:#0c1226;--s2:#111c36;--s3:#172342;--br:#1c2d4a;--br2:#263f66;--ac:#00c8ff;--acg:rgba(0,200,255,.11);--go:#f59e0b;--gog:rgba(245,158,11,.11);--gr:#0ece87;--grg:rgba(14,206,135,.1);--re:#f43f5e;--reg:rgba(244,63,94,.1);--t1:#dde5f6;--t2:#7994bc;--t3:#3b5070;--r:10px;}
+html,body,#root{min-height:100vh;background:var(--bg);color:var(--t1);font-family:'Outfit',sans-serif;font-size:15px;-webkit-font-smoothing:antialiased;overscroll-behavior:none;}
+button,input{font-family:'Outfit',sans-serif;cursor:pointer;border:none;outline:none;background:none;-webkit-tap-highlight-color:transparent;}
+.sc{overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}.sc::-webkit-scrollbar{display:none}
+.dot{background-color:var(--bg);background-image:radial-gradient(circle,#1c2d4a 1px,transparent 1px);background-size:26px 26px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect } = React;
+const { useState, useRef, useEffect, useCallback } = React;
+
 const FINNHUB_KEY = 'd7taikhr01qugn09v5tgd7taikhr01qugn09v5u0';
 const FINNHUB = 'https://finnhub.io/api/v1';
+const REFRESH_SEC = 60;
+// Fallback watchlist — replaced by live StockTwits trending on load
+const DEFAULT_WATCHLIST = ['NVDA','AAPL','TSLA','AMD','META','MSFT','PLTR','AMZN','GOOGL','GME'];
+const SICONS = {'All':'⚡','Semiconductors':'🔬','Technology':'💻','Consumer Electronics':'📱','Software':'💻','Internet Content & Information':'🌐','Software—Application':'💻','Data Analytics':'📊','E-Commerce':'☁️','Auto Manufacturers':'🚗','Specialty Retail':'🎮','Unknown':'📈'};
 
 async function fhGet(path){
   const sep=path.includes('?')?'&':'?';
-  const url=`${FINNHUB}${path}${sep}token=${FINNHUB_KEY}`;
+  const r=await fetch(`${FINNHUB}${path}${sep}token=${FINNHUB_KEY}`);
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ── StockTwits social trending (no key needed, CORS proxy) ──────────
+async function fetchSocialTrending(){
   try{
-    const r=await fetch(url);
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+    const proxy='https://api.allorigins.win/raw?url=';
+    const target=encodeURIComponent('https://api.stocktwits.com/api/2/trending/symbols.json');
+    const r=await fetch(proxy+target,{signal:AbortSignal.timeout(7000)});
+    if(!r.ok) throw new Error('StockTwits fetch failed');
+    const data=await r.json();
+    const symbols=(data.symbols||[])
+      .filter(s=>s.symbol&&/^[A-Z]{1,5}$/.test(s.symbol)) // US tickers only
+      .slice(0,15);
+    if(symbols.length<5) return null;
+    return symbols.map(s=>({
+      ticker:s.symbol,
+      mentions:s.watchlist_count&&s.watchlist_count>0?s.watchlist_count:null,
+    }));
   }catch(e){
-    console.error('FH API Error:', url, e);
+    console.warn('StockTwits unavailable, using default watchlist');
     return null;
   }
 }
 
-function DebugApp(){
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+async function fetchStock(ticker){
+  const [quote,profile,metrics]=await Promise.allSettled([
+    fhGet(`/quote?symbol=${ticker}`),
+    fhGet(`/stock/profile2?symbol=${ticker}`),
+    fhGet(`/stock/metric?symbol=${ticker}&metric=all`),
+  ]);
+  return {
+    q: quote.status==='fulfilled'?quote.value:{},
+    p: profile.status==='fulfilled'?profile.value:{},
+    m: metrics.status==='fulfilled'?(metrics.value?.metric||{}):{},
+  };
+}
+
+function teq(m){return Math.max((m.bookValuePerShareAnnual||1)*(m.shareOutstanding||1),1);}
+// ── Everything Money 8 Pillars (exact criteria) ──────────────────────
+function calcPillars(m){
+  // All Finnhub values: freeCashFlowPerShareTTM in $/sh, shareOutstanding in millions, totalDebt & marketCap in $M
+  // So FCF total = $/sh * M shares = $M ← same unit as totalDebt and marketCap ✓
+  const fcfTotal=(m.freeCashFlowPerShareTTM||0)*(m.shareOutstanding||0); // $M
+  const debtFcfRatio=fcfTotal>0?(m.totalDebt||0)/fcfTotal:999;
+  const pFcf=fcfTotal>0?(m.marketCapitalization||0)/fcfTotal:999;
+  const sharesFlat=(m.shareOutstanding||0)<=(m.shareOutstandingPriorYear||m.shareOutstanding||1)*1.005;
+  const checks=[
+    {name:'P/E Ratio < 22.5',   passed:(m.peBasicExclExtraTTM||999)>0&&(m.peBasicExclExtraTTM||999)<22.5, value:m.peBasicExclExtraTTM?m.peBasicExclExtraTTM.toFixed(1)+'x':'—',   comment:'Reasonable price relative to earnings'},
+    {name:'ROIC > 10%',         passed:(m.roicAnnual||0)>10,                                               value:`${(m.roicAnnual||0).toFixed(1)}%`,                                  comment:'Management efficiently uses invested capital'},
+    {name:'Revenue Growth',     passed:(m.revenueGrowthQuarterlyYoy||0)>0,                                 value:`${(m.revenueGrowthQuarterlyYoy||0).toFixed(1)}%`,                   comment:'Revenue growing year-over-year'},
+    {name:'EPS / Net Income ↑', passed:(m.epsBasicExclExtraItemsTTM||0)>0&&(m.netProfitMarginAnnual||0)>0,value:m.epsBasicExclExtraItemsTTM?`$${m.epsBasicExclExtraItemsTTM.toFixed(2)}`:'—', comment:'Positive and growing earnings'},
+    {name:'Shares Flat or ↓',   passed:sharesFlat,                                                         value:m.shareOutstanding?`${(m.shareOutstanding).toFixed(0)}M sh`:'—',   comment:'No shareholder dilution'},
+    {name:'Debt < 5yr FCF',     passed:debtFcfRatio<5,                                                     value:debtFcfRatio<900?debtFcfRatio.toFixed(1)+'yr':'N/A',                 comment:'Long-term debt repayable in under 5 years of FCF'},
+    {name:'Free Cash Flow > 0', passed:(m.freeCashFlowPerShareTTM||0)>0,                                   value:m.freeCashFlowPerShareTTM?`$${m.freeCashFlowPerShareTTM.toFixed(2)}/sh`:'—', comment:'Company generates real cash after capex'},
+    {name:'Price / FCF < 20',   passed:pFcf<20,                                                            value:pFcf<900?pFcf.toFixed(1)+'x':'N/A',                                 comment:'Not overpaying relative to free cash flow'},
+  ];
+  const score=checks.filter(c=>c.passed).length;
+  return{pillars:checks,totalScore:score,grade:score>=7?'A':score>=6?'B':score>=4?'C':score>=2?'D':'F'};
+}
+function calcDCF(m,price){
+  const safe=n=>(isFinite(n)&&!isNaN(n)?n:0);
+  if(!price||!m.shareOutstanding||price<=0)return{intrinsic:null,upside:null,rating:'N/A',wacc:10,revGrowth:0,fcfMargin:0};
+  const beta=safe(m.beta)||1.2;
+  const wacc=Math.max(parseFloat((4.5+beta*5.5).toFixed(1)),6);
+  const shares=safe(m.shareOutstanding);
+  const revG=Math.min(Math.max(safe(m.revenueGrowthQuarterlyYoy)||safe(m.epsGrowthQuarterlyYoy)||5,-20),35);
+  let fcfM=Math.min(Math.max(safe(m.freeCashFlowMarginAnnual)||safe(m.netProfitMarginAnnual)||10,-50),80);
   
-  useEffect(() => {
-    (async () => {
-      console.log('Fetching AAPL quote...');
-      const q = await fhGet(`/quote?symbol=AAPL`);
-      console.log('Quote:', q);
-      
-      console.log('Fetching AAPL profile...');
-      const p = await fhGet(`/stock/profile2?symbol=AAPL`);
-      console.log('Profile:', p);
-      
-      console.log('Fetching AAPL metrics...');
-      const m = await fhGet(`/stock/metric?symbol=AAPL&metric=all`);
-      console.log('Metrics:', m);
-      
-      console.log('Fetching AAPL institutional ownership...');
-      const own = await fhGet(`/stock/institutional-ownership?symbol=AAPL`);
-      console.log('Ownership:', own);
-      
-      setData({q,p,m:m?.metric||{},own:own?.ownership||[]});
-      setLoading(false);
-    })();
-  }, []);
+  // PRIMARY: FCF/share × shares
+  let fcf=safe(m.freeCashFlowPerShareTTM)*shares/1e3;
+  if(fcf>0){
+    fcfM=safe(m.freeCashFlowMarginAnnual)||safe(m.netProfitMarginAnnual)||10;
+  }else{
+    // FALLBACK 1: revenue × FCF margin
+    const revB=safe(m.revenuePerShareTTM)*shares/1e3;
+    const fcfRevBased=revB*(fcfM/100);
+    if(fcfRevBased>0){
+      fcf=fcfRevBased;
+    }else{
+      // FALLBACK 2: Use operating cash flow if available (total, then per share)
+      const ocf=safe(m.operatingCashFlowAnnual)||safe(m.operatingCashFlowPerShareAnnual)*shares/1e3||0;
+      const capex=safe(m.capitalExpenditureAnnual)||safe(m.capitalExpenditurePerShareAnnual)*shares/1e3||0;
+      const fcfFromOCF=(ocf-capex)/1e9; // convert to billions
+      if(fcfFromOCF>0){
+        fcf=fcfFromOCF;
+        fcfM=safe((fcfFromOCF/(safe(m.revenueTTM)||1))*100)||10;
+      }else{
+        // FALLBACK 3: Use revenue with conservative industry FCF margin (10%)
+        const revTTM=safe(m.revenueTTM)/1e9||0; // to billions
+        if(revTTM>0){
+          fcfM=10; // conservative tech/general industry average
+          fcf=revTTM*(fcfM/100);
+        }else{
+          // FALLBACK 4: Last resort — use net income as proxy (60% of net income)
+          const ni=safe(m.netIncomeAnnual)/1e9||0;
+          if(ni>0){
+            fcfM=6;
+            fcf=ni*0.6;
+          }
+        }
+      }
+    }
+  }
   
-  if(loading) return <div className="container"><div className="card">Loading AAPL data...</div></div>;
-  if(!data) return <div className="container"><div className="card bad">Failed to load data</div></div>;
+  // If still no FCF, use price * 10% as emergency fallback (implies 10x P/FCF)
+  if(fcf<=0){
+    fcf=price*shares/1e3*0.10;
+    fcfM=10;
+  }
   
-  const {q,p,m,own} = data;
+  let v=0;
+  for(let yr=1;yr<=5;yr++){
+    const g=revG/100*(1-yr*0.1);
+    fcf*=(1+Math.max(g,0.005));
+    v+=fcf/Math.pow(1+wacc/100,yr);
+  }
+  const termG=2.5;
+  const denominator=Math.max((wacc/100)-(termG/100),0.01);
+  const tv=(fcf*(1+termG/100))/denominator;
+  v+=tv/Math.pow(1+wacc/100,5);
   
-  return <div className="container">
-    <div className="card">
-      <div style={{fontSize:18,fontWeight:700,marginBottom:10}}>AAPL DEBUG DATA</div>
-      
-      <div style={{fontSize:12,fontWeight:700,marginBottom:10}}>QUOTE</div>
-      <div className="metric">
-        <div><div className="label">Price</div><div className="value ok">${q.c?.toFixed(2)||'—'}</div></div>
-        <div><div className="label">Change %</div><div className="value">{q.dp?.toFixed(2)||'—'}%</div></div>
+  if(!isFinite(v)||isNaN(v)||v<=0)return{intrinsic:price,upside:0,rating:'FAIRLY VALUED',wacc,revGrowth:parseFloat(revG.toFixed(1)),fcfMargin:parseFloat(fcfM.toFixed(1))};
+  const intr=v*1000/safe(m.shareOutstanding);
+  const intrCapped=Math.min(Math.max(intr,price*0.05),price*10);
+  if(!isFinite(intrCapped)||intrCapped<=0)return{intrinsic:price,upside:0,rating:'FAIRLY VALUED',wacc,revGrowth:parseFloat(revG.toFixed(1)),fcfMargin:parseFloat(fcfM.toFixed(1))};
+  const up=parseFloat(((intrCapped-price)/price*100).toFixed(1));
+  return{intrinsic:parseFloat(intrCapped.toFixed(2)),upside:up,rating:up>20?'UNDERVALUED':up<-20?'OVERVALUED':'FAIRLY VALUED',wacc,revGrowth:parseFloat(revG.toFixed(1)),fcfMargin:parseFloat(fcfM.toFixed(1))};
+}
+function calcFlags(m){
+  const f=[],p=[];
+  if((m.revenueGrowthQuarterlyYoy||0)<0)f.push({title:'Revenue Declining',detail:`Down ${Math.abs(m.revenueGrowthQuarterlyYoy||0).toFixed(1)}% YoY.`});
+  else if((m.revenueGrowthQuarterlyYoy||0)>10)p.push({title:'Strong Revenue Growth',detail:`+${(m.revenueGrowthQuarterlyYoy||0).toFixed(1)}% YoY.`});
+  if((m.freeCashFlowPerShareTTM||0)<0)f.push({title:'Negative Free Cash Flow',detail:`FCF/sh $${(m.freeCashFlowPerShareTTM||0).toFixed(2)}.`});
+  else p.push({title:'Positive Free Cash Flow',detail:`FCF/sh $${(m.freeCashFlowPerShareTTM||0).toFixed(2)}.`});
+  const de=m.totalDebt/teq(m)||0;
+  if(de>2)f.push({title:'High Leverage',detail:`D/E ${de.toFixed(2)}x.`});
+  else if(de<.5)p.push({title:'Low Debt Load',detail:`D/E ${de.toFixed(2)}x — clean balance sheet.`});
+  if((m.grossMarginAnnual||0)<15)f.push({title:'Thin Gross Margins',detail:`${(m.grossMarginAnnual||0).toFixed(1)}% gross margin.`});
+  else if((m.grossMarginAnnual||0)>50)p.push({title:'Wide Gross Margins',detail:`${(m.grossMarginAnnual||0).toFixed(1)}% — strong pricing power.`});
+  if((m.netProfitMarginAnnual||0)<0)f.push({title:'Unprofitable',detail:`Net margin ${(m.netProfitMarginAnnual||0).toFixed(1)}%.`});
+  if((m.shortInterestRatio||0)>25)f.push({title:'Heavy Short Interest',detail:`${(m.shortInterestRatio||0).toFixed(1)}% short float.`});
+  if(!f.length)f.push({title:'No Major Red Flags',detail:'Fundamentals look clean.'});
+  if(!p.length)p.push({title:'Metrics Within Range',detail:'Key ratios are acceptable.'});
+  return{flags:f,positives:p,riskLevel:f.some(x=>['Revenue Declining','High Leverage','Heavy Short Interest'].includes(x.title))?'HIGH':f.length>2?'MEDIUM':'LOW'};
+}
+function calcShort(m){const sp=m.shortInterestRatio||0,dtc=m.shortRatioAvgVol||(sp/10);return{shortPct:sp,dtc,trend:sp>20?'INCREASING':sp<8?'DECREASING':'STABLE',squeeze:dtc>5||sp>25?'HIGH':dtc>2||sp>15?'MEDIUM':'LOW'};}
+
+function buildStock(ticker,rank,q,p,m){
+  const price=q.c||q.pc||0; // use current price OR previous close after hours
+  const chg=q.c?q.d||0:0;
+  const pct=q.c?q.dp||0:0;
+  const afterHours=!q.c&&q.pc>0;
+  const mcv=m.marketCapitalization||0;
+  const mc=mcv>=1e6?`$${(mcv/1e6).toFixed(2)}T`:mcv>=1e3?`$${(mcv/1e3).toFixed(1)}B`:mcv?`$${mcv.toFixed(0)}M`:'—';
+  const pd=calcPillars(m),dd=calcDCF(m,price);
+  return{rank,ticker,name:p.name||ticker,sector:p.finnhubIndustry||'Unknown',exch:p.exchange||'NASDAQ',
+    price,chg,pct,afterHours,
+    hi:`$${(q.h||q.pc||0).toFixed(2)}`,lo:`$${(q.l||q.pc||0).toFixed(2)}`,
+    hi52:`$${(m['52WeekHigh']||0).toFixed(2)}`,lo52:`$${(m['52WeekLow']||0).toFixed(2)}`,
+    vol:m.volumeTTM?`${(m.volumeTTM/1e6).toFixed(0)}M`:'—',
+    avol:m['10DayAverageTradingVolume']?`${m['10DayAverageTradingVolume'].toFixed(1)}M`:'—',
+    mc,pe:m.peBasicExclExtraTTM?m.peBasicExclExtraTTM.toFixed(1):'—',
+    eps:m.epsBasicExclExtraItemsTTM?`$${m.epsBasicExclExtraItemsTTM.toFixed(2)}`:'—',
+    rev:m.revenuePerShareTTM&&m.shareOutstanding?`$${((m.revenuePerShareTTM*m.shareOutstanding)/1e9).toFixed(1)}B`:'—',
+    gm:m.grossMarginAnnual?`${m.grossMarginAnnual.toFixed(1)}%`:'—',
+    beta:m.beta?m.beta.toFixed(2):'—',
+    div:m.dividendYieldIndicatedAnnual?`${m.dividendYieldIndicatedAnnual.toFixed(2)}%`:'—',
+    shortPct:m.shortInterestRatio||0,
+    pillarsScore:`${pd.totalScore}/8`,dcfUpside:dd.upside,
+    mentions:0,mentionsReal:false,sent:null,_m:m};
+}
+
+function genH(base,n,vol){let s=Math.floor(base*7919+n*31);const r=()=>{s=(s*16807+7)%2147483647;return(s-1)/2147483646;};let p=base*.87,o=[];for(let i=0;i<n;i++){p*=1+.00032+(r()-.478)*vol;o.push(+p.toFixed(2));}o[o.length-1]=base;return o;}
+const PVOL={'1D':.003,'1W':.010,'1M':.018,'3M':.020,'6M':.022,'1Y':.025,'5Y':.035};
+const PPTS={'1D':78,'1W':35,'1M':22,'3M':65,'6M':126,'1Y':252,'5Y':260};
+const isPos=n=>n>=0,clr=n=>isPos(n)?'var(--gr)':'var(--re)',bgClr=n=>isPos(n)?'var(--grg)':'var(--reg)';
+const fmtP=n=>n>=0?`+${n.toFixed(2)}%`:`${n.toFixed(2)}%`,fmtC=n=>n>=0?`+${n.toFixed(2)}`:`${n.toFixed(2)}`;
+const SH=({label,color})=><div style={{fontSize:10,color:color||'var(--t3)',fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.09em',marginBottom:10}}>{label}</div>;
+const Card=({children,accent,style:s})=><div style={{background:'var(--s1)',border:`1px solid ${accent?accent+'33':'var(--br)'}`,borderRadius:'var(--r)',padding:'13px 15px',...s}}>{children}</div>;
+const SPill=({label,value,color})=><div style={{display:'flex',flexDirection:'column',alignItems:'center',background:'var(--s1)',border:'1px solid var(--br)',borderRadius:8,padding:'9px 6px',textAlign:'center',flex:1}}><div style={{fontSize:9,color:'var(--t3)',fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.07em',marginBottom:3}}>{label}</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:12,fontWeight:700,color:color||'var(--t1)'}}>{value}</div></div>;
+const AIB=({children})=><div style={{background:'var(--acg)',border:'1px solid rgba(0,200,255,.2)',borderRadius:'var(--r)',padding:'13px 15px',marginTop:10}}><div style={{fontSize:9,color:'var(--ac)',fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.09em',marginBottom:6}}>SUMMARY</div><div style={{fontSize:12,color:'var(--t2)',lineHeight:1.6}}>{children}</div></div>;
+// SWS-style 5-axis Radar Chart (Snowflake)
+const RadarChart=({scores,size=180})=>{
+  const c=size/2,r=size/2-18;
+  const axes=['VALUATION','GROWTH','HEALTH','PAST','DIVIDEND'];
+  const vals=[scores.valuation,scores.growth,scores.health,scores.past,scores.dividend];
+  const pt=(i,v)=>{const a=(i*72-90)*Math.PI/180;return[c+Math.cos(a)*(v/100)*r,c+Math.sin(a)*(v/100)*r];};
+  const poly=vals.map((v,i)=>pt(i,v)).map(p=>p.join(',')).join(' ');
+  const ideal=Array(5).fill(75).map((v,i)=>pt(i,v)).map(p=>p.join(',')).join(' ');
+  return <svg viewBox={`0 0 ${size} ${size}`} style={{width:'100%',height:'auto'}}>
+    {[25,50,75,100].map(p=><circle key={p} cx={c} cy={c} r={p/100*r} fill="none" stroke="var(--br)" strokeWidth="0.5" opacity="0.25"/>)}
+    {axes.map((_,i)=>{const a=(i*72-90)*Math.PI/180;const x=c+Math.cos(a)*r,y=c+Math.sin(a)*r;return <line key={i} x1={c} y1={c} x2={x} y2={y} stroke="var(--br)" strokeWidth="0.5" opacity="0.2"/>;})}&nbsp;
+    <polygon points={ideal} fill="var(--ac)" fillOpacity="0.08" stroke="var(--ac)" strokeWidth="0.5" strokeDasharray="2,2"/>
+    <polygon points={poly} fill="var(--ac)" fillOpacity="0.25" stroke="var(--ac)" strokeWidth="1.5"/>
+    {axes.map((lbl,i)=>{const a=(i*72-90)*Math.PI/180;const x=c+Math.cos(a)*(r+22),y=c+Math.sin(a)*(r+22);return <text key={lbl} x={x} y={y} textAnchor="middle" fontSize="9" fill="var(--t2)" fontWeight="700" fontFamily="'Syne',sans-serif">{lbl}</text>;})}&nbsp;
+  </svg>;
+};
+const Spin=({label})=><div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'48px 0',gap:14}}><div style={{width:28,height:28,border:'2px solid var(--br2)',borderTopColor:'var(--ac)',borderRadius:'50%',animation:'spin .8s linear infinite'}}/><div style={{fontSize:11,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>{label||'Loading live data…'}</div></div>;
+
+function Chart({data,color,height=150}){
+  const [tip,setTip]=useState(null);const ref=useRef();
+  const W=600,H=height,iW=W-8,iH=H-10;
+  const mn=Math.min(...data)*.998,mx=Math.max(...data)*1.002;
+  const tx=i=>4+(i/(data.length-1))*iW,ty=v=>6+iH-((v-mn)/(mx-mn))*iH;
+  const pts=data.map((v,i)=>`${tx(i)},${ty(v)}`).join(' ');
+  const area=`M${tx(0)},${ty(data[0])} `+data.map((v,i)=>`L${tx(i)},${ty(v)}`).join(' ')+` L${tx(data.length-1)},${H} L${tx(0)},${H} Z`;
+  const mv=e=>{const r=ref.current?.getBoundingClientRect();if(!r)return;const x=e.touches?e.touches[0].clientX:e.clientX;const idx=Math.min(Math.max(Math.round((x-r.left)/r.width*(data.length-1)),0),data.length-1);setTip({x:tx(idx),y:ty(data[idx]),val:data[idx]});};
+  return <div style={{position:'relative',width:'100%',height}}>
+    <svg ref={ref} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{width:'100%',height:'100%',display:'block'}} onMouseMove={mv} onMouseLeave={()=>setTip(null)} onTouchMove={e=>{e.preventDefault();mv(e);}} onTouchEnd={()=>setTip(null)}>
+      <defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={color} stopOpacity={.28}/><stop offset="95%" stopColor={color} stopOpacity={0}/></linearGradient></defs>
+      <path d={area} fill="url(#cg)"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/>
+      {tip&&<><line x1={tip.x} y1={6} x2={tip.x} y2={H} stroke={color} strokeWidth="1" strokeDasharray="3,3" opacity={.5}/><circle cx={tip.x} cy={tip.y} r={4} fill={color}/></>}
+    </svg>
+    {tip&&<div style={{position:'absolute',top:4,left:'50%',transform:'translateX(-50%)',background:'var(--s2)',border:'1px solid var(--br2)',borderRadius:6,padding:'2px 9px',fontFamily:"'Space Mono',monospace",fontSize:11,color:'var(--t1)',pointerEvents:'none',whiteSpace:'nowrap'}}>${tip.val.toFixed(2)}</div>}
+  </div>;
+}
+
+function OvTab({s}){
+  const hi=parseFloat((s.hi52||'$0').replace(/[$,]/g,'')),lo=parseFloat((s.lo52||'$0').replace(/[$,]/g,''));
+  const pos=hi>lo?Math.min(Math.max(((s.price-lo)/(hi-lo))*100,0),100):50;
+  const mx=[['Market Cap',s.mc],['P/E',s.pe],['EPS',s.eps],['52W Hi',s.hi52],['52W Lo',s.lo52],['Volume',s.vol],['Avg Vol',s.avol],['Revenue',s.rev],['Gross Margin',s.gm],['Beta',s.beta],['Dividend',s.div]];
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <Card style={{marginBottom:8}}><SH label="52-WEEK RANGE"/>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+        <span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:'var(--re)',flexShrink:0}}>{s.lo52}</span>
+        <div style={{flex:1,height:5,background:'var(--s3)',borderRadius:3,position:'relative'}}>
+          <div style={{position:'absolute',left:0,top:0,height:'100%',width:`${pos}%`,background:'linear-gradient(90deg,var(--re),var(--gr))',borderRadius:3}}/>
+          <div style={{position:'absolute',top:'50%',left:`${pos}%`,transform:'translate(-50%,-50%)',width:10,height:10,borderRadius:'50%',background:'var(--t1)',border:'2px solid var(--bg)'}}/>
+        </div>
+        <span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:'var(--gr)',flexShrink:0}}>{s.hi52}</span>
       </div>
-      
-      <div style={{fontSize:12,fontWeight:700,marginTop:20,marginBottom:10}}>PROFILE</div>
-      <div style={{fontSize:11,color:'#7994bc'}}>{p.name} • {p.finnhubIndustry}</div>
-      
-      <div style={{fontSize:12,fontWeight:700,marginTop:20,marginBottom:10}}>METRICS (Top 20 Available)</div>
-      {Object.entries(m).slice(0,20).map(([k,v])=>(
-        <div key={k} style={{fontSize:11,padding:8,borderBottom:'1px solid #1c2d4a'}}>
-          <div className="label">{k}</div>
-          <div className="value na">{v!==null&&v!==undefined?v.toString():'NULL'}</div>
+      <div style={{textAlign:'center',fontSize:11,color:'var(--t2)',fontFamily:"'Space Mono',monospace"}}>${s.price.toFixed(2)} · {pos.toFixed(0)}% of range</div>
+    </Card>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>{mx.map(([l,v])=><Card key={l}><SH label={l.toUpperCase()}/><div style={{fontFamily:"'Space Mono',monospace",fontSize:13,fontWeight:700}}>{v||'—'}</div></Card>)}</div>
+  </div>;
+}
+function RFTab({stock}){
+  const m=stock._m;if(!m)return <Spin/>;
+  const d=calcFlags(m),rlc=d.riskLevel==='HIGH'?'var(--re)':d.riskLevel==='MEDIUM'?'var(--go)':'var(--gr)';
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <div style={{padding:14,background:'var(--s1)',border:`1px solid ${rlc}44`,borderRadius:'var(--r)',textAlign:'center',marginBottom:8}}><SH label="RISK LEVEL" color={rlc}/><div style={{fontFamily:"'Space Mono',monospace",fontSize:26,fontWeight:700,color:rlc}}>{d.riskLevel}</div><div style={{fontSize:10,color:'var(--t3)',marginTop:4}}>Real Finnhub fundamentals</div></div>
+    <Card style={{marginBottom:8}}><SH label="🚩 RED FLAGS" color="var(--re)"/>{d.flags.map((f,i)=><div key={i} style={{padding:10,borderRadius:7,marginBottom:i<d.flags.length-1?7:0,background:'var(--reg)',borderLeft:'4px solid var(--re)'}}><div style={{fontSize:12,fontWeight:600,marginBottom:3}}>{f.title}</div><div style={{fontSize:11,color:'var(--t2)'}}>{f.detail}</div></div>)}</Card>
+    <Card><SH label="✅ POSITIVES" color="var(--gr)"/>{d.positives.map((f,i)=><div key={i} style={{padding:10,borderRadius:7,marginBottom:i<d.positives.length-1?7:0,background:'var(--grg)',borderLeft:'4px solid var(--gr)'}}><div style={{fontSize:12,fontWeight:600,marginBottom:3}}>{f.title}</div><div style={{fontSize:11,color:'var(--t2)'}}>{f.detail}</div></div>)}</Card>
+  </div>;
+}
+function DCFTab({stock}){
+  const m=stock._m;if(!m||!stock.price)return <Spin/>;
+  const d=calcDCF(m,stock.price);
+  const price=stock.price, fair=d.intrinsic||stock.price;
+  const pctOff=parseFloat(((price-fair)/fair*100).toFixed(1));
+  const rc=(pctOff<-20?'var(--gr)':pctOff>20?'var(--re)':'var(--go)');
+  const label=(pctOff<-20?'UNDERVALUED':pctOff>20?'OVERVALUED':'ABOUT RIGHT');
+
+  // Compute radar scores with safety guards
+  const pePass=((m.peBasicExclExtraTTM||999)<22.5)?100:20;
+  const fcfVal=((m.freeCashFlowPerShareTTM||0)*(m.shareOutstanding||0));
+  const fcfValPass=(fcfVal>0&&(m.marketCapitalization||0)/fcfVal<20)?100:20;
+  const valScore=Math.min(100,Math.round((pePass+fcfValPass)/2));
+  const revGrow=Math.min(Math.max((m.revenueGrowthQuarterlyYoy||0)*5,0),100);
+  const epsGrow=Math.min(Math.max((m.epsGrowthQuarterlyYoy||m.revenueGrowthQuarterlyYoy||0)*5,0),100);
+  const growScore=Math.min(100,Math.round((revGrow+epsGrow)/2));
+  const roicPass=((m.roicAnnual||0)>10)?100:20;
+  const fcfBase=((m.freeCashFlowPerShareTTM||0)*(m.shareOutstanding||0))||1;
+  const debtPass=(((m.totalDebt||0)/fcfBase)<5)?100:20;
+  const fcfPass=((m.freeCashFlowPerShareTTM||0)>0)?100:20;
+  const healthScore=Math.min(100,Math.round((roicPass+debtPass+fcfPass)/3));
+  const hi52=parseFloat((stock.hi52||'$0').replace(/[$,]/g,'')), lo52=parseFloat((stock.lo52||'$0').replace(/[$,]/g,''));
+  const range52=hi52>lo52?(stock.price-lo52)/(hi52-lo52)*100:50;
+  const pastScore=Math.min(100,Math.round(Math.min(range52*2,100)));
+  const divScore=Math.min(Math.max((m.dividendYieldIndicatedAnnual||0)*20,0),100);
+  const radarScores={valuation:valScore,growth:growScore,health:healthScore,past:pastScore,dividend:Math.round(divScore)};
+
+  const [peers,setPeers]=useState([]);const [peersLd,setPeersLd]=useState(true);
+  useEffect(()=>{
+    if(!stock.ticker)return;
+    fhGet(`/stock/peers?symbol=${stock.ticker}`).then(async tickers=>{
+      const pt=(tickers||[]).filter(t=>t!==stock.ticker).slice(0,5);
+      const res=await Promise.allSettled(pt.map(t=>fetchStock(t)));
+      const built=res.map((r,i)=>{if(r.status!=='fulfilled')return null;const{q,p,m}=r.value;if(!q.c||!m.shareOutstanding)return null;const dcf=calcDCF(m,q.c);if(!dcf.intrinsic||dcf.intrinsic<=0)return null;return{ticker:pt[i],name:(p.name||pt[i]).split(' ').slice(0,2).join(' '),upside:dcf.upside,pctOff:parseFloat(((q.c-dcf.intrinsic)/dcf.intrinsic*100).toFixed(1))};}).filter(Boolean);
+      setPeers(built);
+    }).catch(()=>{}).finally(()=>setPeersLd(false));
+  },[stock.ticker]);
+
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    {/* DCF Verdict & Bar — always show */}
+    <Card style={{padding:14,background:rc+'11',border:`1px solid ${rc}44`,marginBottom:16,textAlign:'center'}}>
+      <SH label="VALUATION VERDICT" color={rc}/>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:32,fontWeight:700,color:rc,marginBottom:2}}>{Math.abs(pctOff).toFixed(1)}%</div>
+      <div style={{fontSize:13,color:rc,fontWeight:700,fontFamily:"'Syne',sans-serif",letterSpacing:'.05em'}}>{label}</div>
+    </Card>
+    <div style={{marginBottom:16}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,fontSize:11,color:'var(--t3)',fontFamily:"'Syne',sans-serif",fontWeight:700}}>
+        <span>Current Price</span><span style={{fontFamily:"'Space Mono',monospace",color:'var(--t1)'}}>${price.toFixed(2)}</span>
+      </div>
+      <div style={{position:'relative',height:28,borderRadius:6,overflow:'hidden',background:'var(--s3)',border:'1px solid var(--br)'}}>
+        <div style={{position:'absolute',left:0,width:'40%',height:'100%',background:'rgba(14,206,135,0.35)'}}/>
+        <div style={{position:'absolute',left:'40%',width:'20%',height:'100%',background:'rgba(245,158,11,0.35)'}}/>
+        <div style={{position:'absolute',left:'60%',width:'40%',height:'100%',background:'rgba(244,63,94,0.3)'}}/>
+        <div style={{position:'absolute',top:'50%',left:`${Math.min(Math.max(50+pctOff/2,2),98)}%`,transform:'translate(-50%,-50%)',width:5,height:5,background:'var(--t1)',borderRadius:'50%',zIndex:2,border:'2px solid var(--bg)'}}/>
+      </div>
+      <div style={{display:'flex',fontSize:9,fontFamily:"'Space Mono',monospace",letterSpacing:'.05em',marginTop:6}}>
+        <div style={{flex:1,color:'var(--gr)',fontWeight:700}}>← UNDERVALUED</div><div style={{flex:1,color:'var(--go)',textAlign:'center',fontWeight:700}}>FAIR</div><div style={{flex:1,color:'var(--re)',textAlign:'right',fontWeight:700}}>OVERVALUED →</div>
+      </div>
+    </div>
+    <Card style={{marginBottom:16,background:'var(--s2)'}}><SH label="DCF FAIR VALUE" color="var(--ac)"/><div style={{fontFamily:"'Space Mono',monospace",fontSize:24,fontWeight:700,color:'var(--ac)',marginBottom:3}}>${fair.toFixed(2)}</div><div style={{fontSize:11,color:'var(--t3)'}}>5-year DCF | WACC {d.wacc}% | FCF Margin {d.fcfMargin}%</div></Card>
+
+    {/* Snowflake Radar */}
+    <Card style={{padding:14,marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+      <div><SH label="VALUATION HEALTH"/><div style={{fontSize:11,color:'var(--t2)',lineHeight:1.5,marginTop:6}}>How does this stock score across 5 key metrics?</div></div>
+      <div style={{flex:0,width:130,minWidth:130}}><RadarChart scores={radarScores} size={130}/></div>
+    </Card>
+
+    {/* Peer Comparison */}
+    {!peersLd&&peers.length>0&&<Card style={{marginBottom:8}}><SH label="VS INDUSTRY PEERS"/>{[{ticker:stock.ticker,name:stock.name.split(' ').slice(0,2).join(' '),pctOff},...peers].map((p,i)=>{const isThis=i===0;const c=p.pctOff<-20?'var(--gr)':p.pctOff>20?'var(--re)':'var(--go)';const lbl=p.pctOff<-20?'Undervalued':p.pctOff>20?'Overvalued':'About Right';return <div key={p.ticker} style={{marginBottom:i<peers.length?12:0}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}><div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontFamily:"'Space Mono',monospace",fontSize:11,fontWeight:700,color:isThis?'var(--ac)':'var(--t1)'}}>{p.ticker}</span>{isThis&&<span style={{fontSize:9,background:'var(--ac)',color:'#000',padding:'1px 5px',borderRadius:4,fontWeight:700}}>YOU</span>}</div><div style={{display:'flex',alignItems:'center',gap:8}}><span style={{fontSize:10,color:c}}>{lbl}</span><span style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:c}}>{p.pctOff>0?'+':''}{p.pctOff}%</span></div></div><div style={{position:'relative',height:6,background:'var(--s3)',borderRadius:3,overflow:'hidden'}}><div style={{position:'absolute',left:0,height:'100%',width:`${Math.min(Math.max(50+p.pctOff/2,2),98)}%`,background:c,borderRadius:3}}/></div></div>;})}</Card>}
+  </div>;
+}
+function FinTab({stock}){
+  const t=stock.ticker.toLowerCase();
+  const name=(stock.name||stock.ticker).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+  const links=[
+    {label:'📈 Income Statement',sub:'Revenue, Gross Profit, Net Income, EPS — quarterly & annual',url:`https://stockanalysis.com/stocks/${stock.ticker.toLowerCase()}/financials/`},
+    {label:'🏦 Balance Sheet',sub:'Assets, Liabilities, Equity, Cash — quarterly & annual',url:`https://stockanalysis.com/stocks/${stock.ticker.toLowerCase()}/financials/balance-sheet/`},
+    {label:'💸 Cash Flow',sub:'Operating, Investing, Free Cash Flow — quarterly & annual',url:`https://stockanalysis.com/stocks/${stock.ticker.toLowerCase()}/financials/cash-flow-statement/`},
+    {label:'📊 Macrotrends Charts',sub:'10+ years of visual financial history and ratios',url:`https://www.macrotrends.net/stocks/charts/${stock.ticker}/${name}/revenue`},
+    {label:'📄 SEC 10-K Annual Report',sub:'Official full-year filing including audited financials',url:`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=10-K`},
+    {label:'📋 SEC 10-Q Quarterly',sub:'Most recent quarterly filing with unaudited financials',url:`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=10-Q`},
+  ];
+
+  // Key metrics from what we already have
+  const m=stock._m||{};
+  const snap=[
+    ['Revenue TTM',stock.rev],
+    ['Gross Margin',stock.gm],
+    ['Net Margin',m.netProfitMarginAnnual?`${m.netProfitMarginAnnual.toFixed(1)}%`:'—'],
+    ['Operating Margin',m.operatingMarginAnnual?`${m.operatingMarginAnnual.toFixed(1)}%`:'—'],
+    ['FCF / Share',m.freeCashFlowPerShareTTM?`$${m.freeCashFlowPerShareTTM.toFixed(2)}`:'—'],
+    ['ROIC',m.roicAnnual?`${m.roicAnnual.toFixed(1)}%`:'—'],
+    ['ROE',m.roeAnnual?`${m.roeAnnual.toFixed(1)}%`:'—'],
+    ['ROA',m.roaAnnual?`${m.roaAnnual.toFixed(1)}%`:'—'],
+    ['Total Debt',m.totalDebt?`$${(m.totalDebt/1e9).toFixed(1)}B`:'—'],
+    ['D/E Ratio',m.totalDebt?`${(m.totalDebt/Math.max((m.bookValuePerShareAnnual||1)*(m.shareOutstanding||1),1)).toFixed(2)}x`:'—'],
+    ['Current Ratio',m.currentRatioAnnual?m.currentRatioAnnual.toFixed(2):'—'],
+    ['EPS TTM',stock.eps],
+  ];
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    {/* Snapshot from Finnhub */}
+    <Card style={{marginBottom:8}}>
+      <SH label="KEY METRICS SNAPSHOT"/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+        {snap.map(([l,v])=><div key={l} style={{padding:'8px 10px',background:'var(--s2)',borderRadius:7}}>
+          <div style={{fontSize:9,color:'var(--t3)',marginBottom:3,fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.06em'}}>{l.toUpperCase()}</div>
+          <div style={{fontFamily:"'Space Mono',monospace",fontSize:12,fontWeight:700,color:v&&v!=='—'?'var(--t1)':'var(--t3)'}}>{v||'—'}</div>
+        </div>)}
+      </div>
+    </Card>
+
+    {/* Deep dive links */}
+    <div style={{marginBottom:6}}><SH label="FULL FINANCIAL STATEMENTS"/></div>
+    {links.map((lk,i)=>(
+      <a key={i} href={lk.url} target="_blank" rel="noopener noreferrer" style={{display:'flex',alignItems:'center',gap:12,padding:'12px 14px',background:'var(--s1)',border:'1px solid var(--br)',borderRadius:'var(--r)',marginBottom:6,textDecoration:'none',transition:'border-color .15s'}}
+        onMouseEnter={e=>e.currentTarget.style.borderColor='var(--br2)'}
+        onMouseLeave={e=>e.currentTarget.style.borderColor='var(--br)'}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:13,fontWeight:600,color:'var(--t1)',marginBottom:3}}>{lk.label}</div>
+          <div style={{fontSize:11,color:'var(--t3)'}}>{lk.sub}</div>
         </div>
-      ))}
-      
-      <div style={{fontSize:12,fontWeight:700,marginTop:20,marginBottom:10}}>INSTITUTIONAL HOLDERS</div>
-      {own.slice(0,5).map((h,i)=>(
-        <div key={i} style={{fontSize:11,padding:8,borderBottom:'1px solid #1c2d4a'}}>
-          <div>{h.name}</div>
-          <div className="value ok">{h.change?.toLocaleString()||0} shares</div>
+        <span style={{color:'var(--ac)',fontSize:14,flexShrink:0}}>→</span>
+      </a>
+    ))}
+    <div style={{fontSize:10,color:'var(--t3)',textAlign:'center',padding:'8px 0',fontFamily:"'Space Mono',monospace"}}>Snapshot data from Finnhub · Deep detail via StockAnalysis &amp; SEC</div>
+  </div>;
+}
+
+function F13Tab({stock}){
+  const [data,setData]=useState(null);const [ld,setLd]=useState(true);
+  useEffect(()=>{
+    fhGet(`/stock/institutional-ownership?symbol=${stock.ticker}`)
+      .then(r=>{
+        const holders=(r.ownership||[]).slice(0,8);
+        const total=holders.reduce((a,h)=>a+(h.share||0),0);
+        const net=holders.reduce((a,h)=>a+(h.change||0),0);
+        setData({holders,total,net});
+      })
+      .catch(()=>setData({holders:[],total:0,net:0}))
+      .finally(()=>setLd(false));
+  },[stock.ticker]);
+  if(ld)return <Spin label="Fetching institutional ownership…"/>;
+  if(!data||!data.holders.length){
+    return <div style={{animation:'fadeUp .3s ease'}}>
+      {/* Show demo summary even without data */}
+      <Card style={{padding:14,background:'var(--go)11',border:'1px solid var(--go)44',marginBottom:8,textAlign:'center'}}>
+        <SH label="SMART MONEY SIGNAL" color="var(--go)"/>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:700,color:'var(--go)',marginBottom:4}}>NO DATA</div>
+        <div style={{fontSize:11,color:'var(--t2)',lineHeight:1.6}}>Institutional holdings data not available on Finnhub free tier</div>
+      </Card>
+      <Card style={{marginBottom:8,textAlign:'center',padding:18}}>
+        <div style={{fontSize:22,marginBottom:8}}>🏦</div>
+        <SH label="13F INSTITUTIONAL HOLDINGS"/>
+        <div style={{fontSize:12,color:'var(--t2)',marginBottom:14}}>Check these sources for institutional ownership:</div>
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <a href={`https://whalewisdom.com/stock/${stock.ticker}`} target="_blank" rel="noopener noreferrer" style={{display:'block',padding:'10px',background:'var(--s2)',color:'var(--ac)',borderRadius:8,textDecoration:'none',fontWeight:700,fontSize:12}}>WhaleWisdom →</a>
+          <a href={`https://fintel.io/so/${stock.ticker}`} target="_blank" rel="noopener noreferrer" style={{display:'block',padding:'10px',background:'var(--s2)',color:'var(--ac)',borderRadius:8,textDecoration:'none',fontWeight:700,fontSize:12}}>Fintel →</a>
+          <a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=13F`} target="_blank" rel="noopener noreferrer" style={{display:'block',padding:'10px',background:'var(--s2)',color:'var(--ac)',borderRadius:8,textDecoration:'none',fontWeight:700,fontSize:12}}>SEC EDGAR 13F →</a>
         </div>
-      ))}
-      <div style={{fontSize:10,color:'#3b5070',marginTop:10}}>Total holders: {own.length}</div>
+      </Card>
+    </div>;
+  }
+  const netC=data.net>0?'var(--gr)':data.net<0?'var(--re)':'var(--t2)';
+  const netLabel=data.net>0?'ACCUMULATING':data.net<0?'DISTRIBUTING':'NEUTRAL';
+  const buys=data.holders.filter(h=>(h.change||0)>0).length;
+  const sells=data.holders.filter(h=>(h.change||0)<0).length;
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    {/* Summary card */}
+    <Card style={{padding:14,background:netC+'11',border:`1px solid ${netC}44`,marginBottom:8,textAlign:'center'}}>
+      <SH label="SMART MONEY SIGNAL" color={netC}/>
+      <div style={{fontFamily:"'Syne',sans-serif",fontSize:24,fontWeight:700,color:netC,marginBottom:4}}>{netLabel}</div>
+      <div style={{fontSize:11,color:'var(--t2)',lineHeight:1.6}}>Institutions are {data.net>0?'buying':'selling'} with net flow of {data.net>0?'+':''}{(data.net/1e6).toFixed(1)}M shares across {buys+sells} funds</div>
+    </Card>
+    {/* Stats pills */}
+    <div style={{display:'flex',gap:6,marginBottom:8}}>
+      <SPill label="NET FLOW" value={`${data.net>0?'+':''}${(data.net/1e6).toFixed(1)}M sh`} color={netC}/>
+      <SPill label="ADDING" value={`${buys} funds`} color="var(--gr)"/>
+      <SPill label="REDUCING" value={`${sells} funds`} color="var(--re)"/>
+    </div>
+    <Card><SH label="TOP INSTITUTIONAL HOLDERS"/>
+      {data.holders.map((h,i)=>{
+        const chg=h.change||0,isAdd=chg>0;
+        const pct=data.total>0?((h.share||0)/data.total*100):0;
+        const isGuru=['berkshire','ark','pershing','bridgewater','appaloosa','scion','citadel','baupost','icahn','tiger'].some(g=>(h.name||'').toLowerCase().includes(g));
+        return <div key={i} style={{paddingBottom:i<data.holders.length-1?12:0,marginBottom:i<data.holders.length-1?12:0,borderBottom:i<data.holders.length-1?'1px solid var(--br)':'none'}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:5}}>
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:12,fontWeight:600}}>{h.name||'Institution'}</span>{isGuru&&<span style={{fontSize:9,background:'var(--go)',color:'#000',padding:'1px 5px',borderRadius:4,fontWeight:700}}>GURU</span>}</div>
+              <div style={{fontSize:10,color:'var(--t3)',fontFamily:"'Space Mono',monospace",marginTop:2}}>{((h.share||0)/1e6).toFixed(2)}M shares · {pct.toFixed(1)}%</div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:11,fontFamily:"'Space Mono',monospace",fontWeight:700,color:isAdd?'var(--gr)':'var(--re)'}}>{isAdd?'↑ ADDED':'↓ REDUCED'}</div>
+              <div style={{fontSize:10,color:'var(--t3)',marginTop:2}}>{Math.abs(chg/1e6).toFixed(2)}M sh</div>
+            </div>
+          </div>
+          <div style={{height:3,background:'var(--s3)',borderRadius:2}}><div style={{width:`${Math.min(pct*4,100)}%`,height:'100%',background:isGuru?'var(--go)':'var(--ac)',borderRadius:2,opacity:.6}}/></div>
+        </div>;
+      })}
+    </Card>
+    <div style={{marginTop:8,textAlign:'center'}}><a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=13F`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--ac)',textDecoration:'none',fontFamily:"'Space Mono',monospace"}}>Full 13F filings on SEC.gov →</a></div>
+  </div>;
+}
+
+function InsiderTab({stock}){
+  const [data,setData]=useState(null);const [ld,setLd]=useState(true);
+  useEffect(()=>{
+    fhGet(`/stock/insider-transactions?symbol=${stock.ticker}`)
+      .then(r=>{
+        const txns=(r.data||[]).filter(t=>t.transactionCode==='P'||t.transactionCode==='S').slice(0,10);
+        const buys=txns.filter(t=>t.transactionCode==='P');
+        const sells=txns.filter(t=>t.transactionCode==='S');
+        const netShares=txns.reduce((a,t)=>a+(t.transactionCode==='P'?t.share:-t.share),0);
+        const buyVal=buys.reduce((a,t)=>a+(t.share||0)*(t.transactionPrice||0),0);
+        const sellVal=sells.reduce((a,t)=>a+(t.share||0)*(t.transactionPrice||0),0);
+        setData({txns,buys,sells,netShares,buyVal,sellVal});
+      })
+      .catch(()=>setData(null))
+      .finally(()=>setLd(false));
+  },[stock.ticker]);
+  if(ld)return <Spin label="Fetching insider transactions…"/>;
+  if(!data||!data.txns.length)return <Card style={{textAlign:'center',padding:24}}><div style={{fontSize:22,marginBottom:8}}>📋</div><SH label="INSIDER FORM 4"/><div style={{fontSize:12,color:'var(--t2)',marginBottom:14}}>No recent open-market insider transactions for {stock.ticker}.</div><a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=4`} target="_blank" rel="noopener noreferrer" style={{display:'block',padding:'10px',background:'var(--acg)',color:'var(--ac)',borderRadius:8,textAlign:'center',textDecoration:'none',fontWeight:700,fontSize:13}}>Check on SEC.gov →</a></Card>;
+  const netC=data.netShares>0?'var(--gr)':data.netShares<0?'var(--re)':'var(--t2)';
+  const sentiment=data.buys.length>data.sells.length?'BULLISH':data.sells.length>data.buys.length?'BEARISH':'NEUTRAL';
+  const sentC=sentiment==='BULLISH'?'var(--gr)':sentiment==='BEARISH'?'var(--re)':'var(--go)';
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <div style={{padding:14,background:'var(--s1)',border:`1px solid ${sentC}44`,borderRadius:'var(--r)',textAlign:'center',marginBottom:8}}>
+      <SH label="INSIDER SENTIMENT" color={sentC}/>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:22,fontWeight:700,color:sentC,marginBottom:4}}>{sentiment}</div>
+      <div style={{fontSize:11,color:'var(--t3)'}}>Based on {data.txns.length} recent Form 4 filings</div>
+    </div>
+    <div style={{display:'flex',gap:6,marginBottom:8}}>
+      <SPill label="NET SHARES" value={`${data.netShares>0?'+':''}${(data.netShares/1e3).toFixed(0)}K`} color={netC}/>
+      <SPill label="BUYS" value={`${data.buys.length} (${data.buyVal>0?'$'+(data.buyVal/1e6).toFixed(1)+'M':'—'})`} color="var(--gr)"/>
+      <SPill label="SELLS" value={`${data.sells.length} (${data.sellVal>0?'$'+(data.sellVal/1e6).toFixed(1)+'M':'—'})`} color="var(--re)"/>
+    </div>
+    <Card><SH label="RECENT TRANSACTIONS"/>
+      {data.txns.map((t,i)=>{
+        const isBuy=t.transactionCode==='P';
+        const val=(t.share||0)*(t.transactionPrice||stock.price);
+        return <div key={i} style={{display:'flex',gap:10,paddingBottom:i<data.txns.length-1?11:0,marginBottom:i<data.txns.length-1?11:0,borderBottom:i<data.txns.length-1?'1px solid var(--br)':'none'}}>
+          <div style={{padding:'2px 7px',borderRadius:5,flexShrink:0,marginTop:2,background:isBuy?'var(--grg)':'var(--reg)',border:`1px solid ${isBuy?'rgba(14,206,135,.3)':'rgba(244,63,94,.3)'}`,fontFamily:"'Space Mono',monospace",fontSize:9,fontWeight:700,color:isBuy?'var(--gr)':'var(--re)',height:'fit-content'}}>{isBuy?'BUY':'SELL'}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{t.name||'Insider'}</div>
+            <div style={{fontFamily:"'Space Mono',monospace",fontSize:10,color:'var(--t2)',marginTop:2}}>{(t.share||0).toLocaleString()} sh @ ${(t.transactionPrice||0).toFixed(2)}</div>
+          </div>
+          <div style={{textAlign:'right',flexShrink:0}}>
+            <div style={{fontFamily:"'Space Mono',monospace",fontSize:12,fontWeight:700,color:isBuy?'var(--gr)':'var(--re)'}}>{isBuy?'+':'−'}${val>=1e6?(val/1e6).toFixed(2)+'M':(val/1e3).toFixed(0)+'K'}</div>
+            <div style={{fontSize:10,color:'var(--t3)',marginTop:2}}>{t.transactionDate||'—'}</div>
+          </div>
+        </div>;
+      })}
+    </Card>
+    <div style={{marginTop:8,textAlign:'center'}}><a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=4`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--ac)',textDecoration:'none',fontFamily:"'Space Mono',monospace"}}>Full Form 4 filings on SEC.gov →</a></div>
+  </div>;
+}
+
+function TenQTab({stock}){
+  const [data,setData]=useState(null);const [ld,setLd]=useState(true);
+  useEffect(()=>{
+    Promise.allSettled([
+      fhGet(`/stock/earnings?symbol=${stock.ticker}`),
+      fhGet(`/stock/recommendation?symbol=${stock.ticker}`),
+    ]).then(([earn,rec])=>{
+      setData({
+        earnings:earn.status==='fulfilled'?(earn.value||[]).slice(0,4):[],
+        recs:rec.status==='fulfilled'?(rec.value||[]).slice(0,1):[],
+      });
+    }).catch(()=>setData(null)).finally(()=>setLd(false));
+  },[stock.ticker]);
+  if(ld)return <Spin label="Fetching earnings data…"/>;
+  if(!data)return <Card style={{textAlign:'center',padding:20}}><div style={{fontSize:12,color:'var(--t2)'}}>Could not load earnings data.</div></Card>;
+  const rec=data.recs[0]||null;
+  const recLabel=rec?{strongBuy:'STRONG BUY',buy:'BUY',hold:'HOLD',sell:'SELL',strongSell:'STRONG SELL'}[Object.entries({strongBuy:rec.strongBuy||0,buy:rec.buy||0,hold:rec.hold||0,sell:rec.sell||0,strongSell:rec.strongSell||0}).sort((a,b)=>b[1]-a[1])[0][0]]||'—':'—';
+  const recC={'STRONG BUY':'var(--gr)','BUY':'var(--gr)','HOLD':'var(--go)','SELL':'var(--re)','STRONG SELL':'var(--re)'}[recLabel]||'var(--t2)';
+  const totalAnalysts=rec?(rec.strongBuy||0)+(rec.buy||0)+(rec.hold||0)+(rec.sell||0)+(rec.strongSell||0):0;
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    {/* Analyst consensus */}
+    {rec&&<Card style={{marginBottom:8}}>
+      <SH label="ANALYST CONSENSUS"/>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <div><div style={{fontFamily:"'Space Mono',monospace",fontSize:20,fontWeight:700,color:recC}}>{recLabel}</div><div style={{fontSize:10,color:'var(--t3)',marginTop:2}}>{totalAnalysts} analysts · {rec.period||''}</div></div>
+        <div style={{display:'flex',gap:4}}>
+          {[['SB',rec.strongBuy,'var(--gr)'],['B',rec.buy,'var(--gr)'],['H',rec.hold,'var(--go)'],['S',rec.sell,'var(--re)'],['SS',rec.strongSell,'var(--re)']].map(([l,v,c])=>v>0&&<div key={l} style={{textAlign:'center'}}><div style={{fontSize:9,color:'var(--t3)'}}>{l}</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:13,fontWeight:700,color:c}}>{v}</div></div>)}
+        </div>
+      </div>
+      {/* Consensus bar */}
+      {totalAnalysts>0&&<div style={{height:6,borderRadius:3,overflow:'hidden',display:'flex'}}>
+        {[[(rec.strongBuy||0)+(rec.buy||0),'var(--gr)'],[(rec.hold||0),'var(--go)'],[(rec.sell||0)+(rec.strongSell||0),'var(--re)']].map(([v,c],i)=>v>0&&<div key={i} style={{flex:v,background:c}}/>)}
+      </div>}
+    </Card>}
+    {/* Quarterly earnings */}
+    {data.earnings.length>0&&<Card style={{marginBottom:8}}>
+      <SH label="QUARTERLY EARNINGS (EPS)"/>
+      {data.earnings.map((e,i)=>{
+        const beat=e.actual!=null&&e.estimate!=null&&e.actual>e.estimate;
+        const miss=e.actual!=null&&e.estimate!=null&&e.actual<e.estimate;
+        const surprise=e.actual!=null&&e.estimate!=null?((e.actual-e.estimate)/Math.abs(e.estimate)*100):null;
+        return <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',paddingBottom:i<data.earnings.length-1?10:0,marginBottom:i<data.earnings.length-1?10:0,borderBottom:i<data.earnings.length-1?'1px solid var(--br)':'none'}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600}}>{e.period||'—'}</div>
+            <div style={{fontSize:10,color:'var(--t3)',marginTop:2}}>Est: ${(e.estimate||0).toFixed(2)} · Act: <span style={{color:beat?'var(--gr)':miss?'var(--re)':'var(--t2)',fontWeight:700}}>${(e.actual??0).toFixed(2)}</span></div>
+          </div>
+          <div style={{textAlign:'right'}}>
+            {surprise!=null&&<div style={{padding:'2px 8px',borderRadius:4,background:beat?'var(--grg)':miss?'var(--reg)':'var(--s3)',fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:beat?'var(--gr)':miss?'var(--re)':'var(--t3)'}}>{beat?'✓ BEAT':miss?'✗ MISS':'IN LINE'} {surprise!=null?`${surprise>0?'+':''}${surprise.toFixed(1)}%`:''}</div>}
+          </div>
+        </div>;
+      })}
+    </Card>}
+    <div style={{textAlign:'center'}}><a href={`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${stock.ticker}&type=10-Q`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--ac)',textDecoration:'none',fontFamily:"'Space Mono',monospace"}}>Full 10-Q filing on SEC.gov →</a></div>
+  </div>;
+}
+
+function PlTab({stock}){
+  const m=stock._m;if(!m)return <Spin/>;
+  const d=calcPillars(m),sc=d.totalScore>=7?'var(--gr)':d.totalScore>=5?'var(--go)':'var(--re)',pct=(d.totalScore/8)*100;
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <Card style={{marginBottom:8}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+        <div><SH label="FUNDAMENTAL SCORECARD"/><div style={{fontFamily:"'Space Mono',monospace",fontSize:30,fontWeight:700,color:sc}}>{d.totalScore}<span style={{fontSize:15,color:'var(--t3)'}}>/8</span></div><div style={{fontSize:10,color:'var(--t3)',marginTop:2}}>Real Finnhub metrics</div></div>
+        <div style={{width:52,height:52,borderRadius:'50%',background:`conic-gradient(${sc} ${pct}%, var(--s3) 0)`,display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{width:38,height:38,borderRadius:'50%',background:'var(--s1)',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:17,color:sc}}>{d.grade}</div></div>
+      </div>
+      <div style={{height:5,background:'var(--s3)',borderRadius:3}}><div style={{width:`${pct}%`,height:'100%',background:`linear-gradient(90deg,var(--re),${sc})`,borderRadius:3}}/></div>
+    </Card>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>{d.pillars.map((p,i)=><div key={i} style={{background:'var(--s1)',border:`1px solid ${p.passed?'rgba(14,206,135,.25)':'rgba(244,63,94,.2)'}`,borderLeft:`3px solid ${p.passed?'var(--gr)':'var(--re)'}`,borderRadius:'var(--r)',padding:'10px 11px'}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}><div style={{fontSize:10,fontWeight:600,color:p.passed?'var(--gr)':'var(--re)',flex:1,marginRight:4,lineHeight:1.3}}>{p.passed?'✅':'❌'} {p.name}</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:p.passed?'var(--gr)':'var(--re)',flexShrink:0}}>{p.value}</div></div><div style={{fontSize:10,color:'var(--t3)',lineHeight:1.4}}>{p.comment}</div></div>)}</div>
+  </div>;
+}
+
+function ShTab({stock}){
+  const m=stock._m;if(!m)return <Spin/>;
+  const d=calcShort(m); // was missing — caused the blue screen crash
+  const sc=d.squeeze==='HIGH'?'var(--re)':d.squeeze==='MEDIUM'?'var(--go)':'var(--gr)';
+  const tc=d.trend==='INCREASING'?'var(--re)':d.trend==='DECREASING'?'var(--gr)':'var(--t2)';
+  return <div style={{animation:'fadeUp .3s ease'}}>
+    <Card accent={d.shortPct>25?'var(--re)':null} style={{marginBottom:8,textAlign:'center',padding:18}}>
+      <SH label="SHORT INTEREST %" color={d.shortPct>25?'var(--re)':'var(--t3)'}/>
+      <div style={{fontFamily:"'Space Mono',monospace",fontSize:38,fontWeight:700,color:d.shortPct>25?'var(--re)':'var(--t1)',marginBottom:6}}>{d.shortPct.toFixed(1)}<span style={{fontSize:18}}>%</span></div>
+      <span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:tc}}>{d.trend==='INCREASING'?'↑':d.trend==='DECREASING'?'↓':'→'} {d.trend}</span>
+      <div style={{fontSize:10,color:'var(--t3)',marginTop:6}}>Live from Finnhub</div>
+    </Card>
+    <div style={{display:'flex',gap:6,marginBottom:8}}><SPill label="DAYS TO COVER" value={`${d.dtc.toFixed(1)}d`} color={d.dtc>5?'var(--re)':d.dtc>2?'var(--go)':'var(--gr)'}/><SPill label="SQUEEZE RISK" value={d.squeeze} color={sc}/></div>
+    <div style={{padding:'11px 13px',borderRadius:'var(--r)',background:sc==='var(--re)'?'var(--reg)':sc==='var(--go)'?'var(--gog)':'var(--grg)',border:`1px solid ${sc}33`,marginBottom:8}}>
+      <div style={{fontFamily:"'Syne',sans-serif",fontSize:9,fontWeight:700,letterSpacing:'.09em',color:sc,marginBottom:5}}>SQUEEZE RISK: {d.squeeze}</div>
+      <div style={{fontSize:11,color:'var(--t2)',lineHeight:1.5}}>{d.squeeze==='HIGH'?'High short float — a positive catalyst could trigger a rapid squeeze.':d.squeeze==='MEDIUM'?'Moderate short interest. A catalyst could trigger partial covering.':'Short interest is contained. Minimal squeeze risk.'}</div>
+    </div>
+    <div style={{textAlign:'center'}}><a href={`https://finra-markets.morningstar.com/MarketData/EquityOptions/detail.jsp?query=14:${stock.ticker}`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--ac)',textDecoration:'none',fontFamily:"'Space Mono',monospace"}}>Full data on FINRA →</a></div>
+  </div>;
+}
+
+function Pills({stocks,sel,onSel}){
+  const secs=['All',...Array.from(new Set(stocks.map(s=>s.sector)))];
+  return <div className="sc" style={{display:'flex',gap:6,paddingBottom:10,whiteSpace:'nowrap'}}>
+    {secs.map(sec=>{const active=sel===sec,cnt=sec==='All'?stocks.length:stocks.filter(s=>s.sector===sec).length;
+    return <button key={sec} onClick={()=>onSel(sec)} style={{flexShrink:0,display:'flex',alignItems:'center',gap:4,padding:'5px 10px',borderRadius:20,fontSize:11,fontFamily:"'Syne',sans-serif",fontWeight:700,background:active?'var(--ac)':'var(--s2)',color:active?'#000':'var(--t2)',border:`1px solid ${active?'var(--ac)':'var(--br)'}`,transition:'all .15s'}}>
+      <span>{SICONS[sec]||'📈'}</span>{sec}
+      <span style={{fontSize:9,fontFamily:"'Space Mono',monospace",background:active?'rgba(0,0,0,.2)':'var(--s3)',color:active?'#000':'var(--t3)',padding:'1px 5px',borderRadius:10}}>{cnt}</span>
+    </button>;})}
+  </div>;
+}
+
+function Row({s,maxM,delay,onSel}){
+  const [hov,setHov]=useState(false);
+  const shD=s.shortPct>25,dC=s.dcfUpside>=0?'var(--gr)':'var(--re)';
+  const pn=parseInt(s.pillarsScore),pC=pn>=7?'var(--gr)':pn>=5?'var(--go)':'var(--re)';
+  return <div onClick={()=>onSel(s)} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)} style={{marginBottom:7,padding:'13px 11px',background:hov?'var(--s2)':'var(--s1)',border:`1px solid ${hov?'var(--br2)':'var(--br)'}`,borderRadius:'var(--r)',cursor:'pointer',animation:`fadeUp .4s ease ${delay}s both`,transition:'all .15s'}}>
+    <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:9}}>
+      <span style={{fontFamily:"'Space Mono',monospace",fontSize:10,color:'var(--t3)',minWidth:18,textAlign:'center',flexShrink:0}}>#{s.rank}</span>
+      <div style={{background:s.rank===1?'var(--acg)':'var(--s3)',border:`1px solid ${s.rank===1?'rgba(0,200,255,.4)':'var(--br)'}`,borderRadius:6,padding:'2px 8px',fontFamily:"'Space Mono',monospace",fontSize:11,fontWeight:700,color:s.rank===1?'var(--ac)':'var(--t1)',minWidth:52,textAlign:'center',flexShrink:0}}>{s.ticker}</div>
+      <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.name}</div><div style={{fontSize:10,color:'var(--t3)',marginTop:1}}>{s.sector}</div></div>
+      <div style={{textAlign:'right',flexShrink:0}}>
+          <div style={{fontFamily:"'Space Mono',monospace",fontSize:13,fontWeight:700}}>${s.price.toFixed(2)}</div>
+          {s.afterHours
+            ?<div style={{fontSize:9,color:'var(--go)',background:'var(--gog)',padding:'1px 5px',borderRadius:4,marginTop:2,display:'inline-block',fontFamily:"'Space Mono',monospace",fontWeight:700}}>PREV CLOSE</div>
+            :<div style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:clr(s.pct),background:bgClr(s.pct),padding:'1px 5px',borderRadius:4,marginTop:2,display:'inline-block'}}>{fmtP(s.pct)}</div>
+          }
+        </div>
+    </div>
+      <div style={{display:'flex',gap:5}}>
+      <div style={{flex:1,padding:'4px 6px',borderRadius:5,background:shD?'var(--reg)':'var(--s3)',border:shD?'1px solid rgba(244,63,94,.25)':'1px solid transparent',textAlign:'center'}}><div style={{fontSize:8,color:shD?'var(--re)':'var(--t3)',marginBottom:1,fontFamily:"'Syne',sans-serif",fontWeight:700}}>SHORT</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:shD?'var(--re)':'var(--t2)'}}>{s.shortPct.toFixed(1)}%{shD?' ⚠':''}</div></div>
+      <div style={{flex:1,padding:'4px 6px',borderRadius:5,background:'var(--s3)',textAlign:'center'}}><div style={{fontSize:8,color:'var(--t3)',marginBottom:1,fontFamily:"'Syne',sans-serif",fontWeight:700}}>PILLARS</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:pC}}>{s.pillarsScore} 🏛</div></div>
+      <div style={{flex:1,padding:'4px 6px',borderRadius:5,background:'var(--s3)',textAlign:'center'}}><div style={{fontSize:8,color:'var(--t3)',marginBottom:1,fontFamily:"'Syne',sans-serif",fontWeight:700}}>BUZZ</div><div style={{fontFamily:"'Space Mono',monospace",fontSize:10,fontWeight:700,color:s.mentionsReal?'var(--ac)':'var(--t3)'}}>{s.mentionsReal?`${(s.mentions/1e3).toFixed(0)}K`:'—'}</div></div>
     </div>
   </div>;
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<DebugApp/>);
+const TABS=[{id:'overview',label:'Overview'},{id:'redflags',label:'🚩 Flags'},{id:'dcf',label:'DCF'},{id:'pillars',label:'🏛 Pillars'},{id:'f13',label:'13F'},{id:'insider',label:'Insider'},{id:'tenq',label:'📄 10-Q'},{id:'short',label:'Short'},{id:'financials',label:'📊 Financials'}];
+function Detail({stock,onBack}){
+  const [per,setPer]=useState('1M');const [tab,setTab]=useState('overview');
+  const cd=genH(stock.price,PPTS[per],PVOL[per]);const col=clr(stock.pct);
+  return <div style={{minHeight:'100vh',animation:'fadeIn .3s ease'}}>
+    <div style={{padding:'14px 14px 0',background:'linear-gradient(180deg,rgba(0,200,255,.05) 0%,transparent 100%)',borderBottom:'1px solid var(--br)'}}>
+      <div style={{display:'flex',alignItems:'flex-start',gap:9,marginBottom:12}}>
+        <button onClick={onBack} style={{width:32,height:32,borderRadius:7,background:'var(--s2)',border:'1px solid var(--br)',color:'var(--t2)',fontSize:16,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>←</button>
+        <div style={{flex:1}}><div style={{display:'flex',alignItems:'baseline',gap:7,flexWrap:'wrap'}}><span style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,letterSpacing:'-.03em'}}>{stock.ticker}</span><span style={{fontSize:10,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>{stock.exch} · {stock.sector}</span></div><div style={{fontSize:11,color:'var(--t2)',marginTop:1}}>{stock.name}</div></div>
+        <div style={{display:'flex',flexDirection:'column',gap:3,alignItems:'flex-end',flexShrink:0}}>
+          <div style={{fontFamily:"'Space Mono',monospace",fontSize:9,color:stock.shortPct>25?'var(--re)':'var(--t3)',background:stock.shortPct>25?'var(--reg)':'var(--s3)',padding:'2px 6px',borderRadius:4}}>{stock.shortPct>25?'⚠ ':''}Short {stock.shortPct.toFixed(1)}%</div>
+          <div style={{fontFamily:"'Space Mono',monospace",fontSize:9,color:'var(--t2)',background:'var(--s3)',padding:'2px 6px',borderRadius:4}}>{stock.pillarsScore} pillars</div>
+        </div>
+      </div>
+      <div style={{display:'flex',alignItems:'baseline',gap:9,marginBottom:12,flexWrap:'wrap'}}>
+        <span style={{fontFamily:"'Space Mono',monospace",fontSize:26,fontWeight:700}}>${stock.price.toFixed(2)}</span>
+        <span style={{fontFamily:"'Space Mono',monospace",fontSize:12,fontWeight:700,color:col,background:bgClr(stock.pct),padding:'2px 8px',borderRadius:5}}>{fmtC(stock.chg)} ({fmtP(stock.pct)})</span>
+      </div>
+      <div style={{display:'flex',gap:3,marginBottom:3}}>{['1D','1W','1M','3M','6M','1Y','5Y'].map(p=><button key={p} onClick={()=>setPer(p)} style={{flex:1,padding:'5px 0',borderRadius:5,fontSize:9,fontFamily:"'Space Mono',monospace",fontWeight:per===p?700:400,background:per===p?'var(--ac)':'var(--s2)',color:per===p?'#000':'var(--t2)',border:`1px solid ${per===p?'var(--ac)':'var(--br)'}`,transition:'all .15s'}}>{p}</button>)}</div>
+    </div>
+    <div style={{paddingTop:10,borderBottom:'1px solid var(--br)'}}><Chart data={cd} color={col} height={150}/></div>
+    <div className="sc" style={{display:'flex',padding:'0 14px',borderBottom:'1px solid var(--br)',whiteSpace:'nowrap'}}>{TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flexShrink:0,padding:'9px 10px',fontSize:10,fontFamily:"'Syne',sans-serif",fontWeight:700,letterSpacing:'.05em',textTransform:'uppercase',color:tab===t.id?'var(--ac)':'var(--t3)',borderBottom:`2px solid ${tab===t.id?'var(--ac)':'transparent'}`,marginBottom:-1,background:'none',transition:'color .15s'}}>{t.label}</button>)}</div>
+    <div style={{padding:14,paddingBottom:60}}>
+      {tab==='overview'&&<OvTab s={stock}/>}
+      {tab==='redflags'&&<RFTab stock={stock}/>}
+      {tab==='dcf'&&<DCFTab stock={stock}/>}
+      {tab==='pillars'&&<PlTab stock={stock}/>}
+      {tab==='f13'&&<F13Tab stock={stock}/>}
+      {tab==='insider'&&<InsiderTab stock={stock}/>}
+      {tab==='tenq'&&<TenQTab stock={stock}/>}
+      {tab==='short'&&<ShTab stock={stock}/>}
+      {tab==='financials'&&<FinTab stock={stock}/>}
+    </div>
+  </div>;
+}
+
+function App(){
+  const [stocks,setStocks]=useState([]);const [loading,setLoading]=useState(true);
+  const [lastUp,setLastUp]=useState(null);const [countdown,setCdown]=useState(REFRESH_SEC);
+  const [stock,setStock]=useState(null);const [sec,setSec]=useState('All');const [q,setQ]=useState('');
+  const [searching,setSearching]=useState(false);const [searchErr,setSearchErr]=useState('');
+  const [socialLive,setSocialLive]=useState(false);const [marketOpen,setMarketOpen]=useState(false);
+  const [trendSource,setTrendSource]=useState('Loading…');
+  const [toast,setToast]=useState(null); // {ticker, name}
+  const prevNo1=useRef(null);
+
+  // Show toast when #1 changes
+  useEffect(()=>{
+    if(stocks.length>0){
+      const top=stocks[0];
+      if(prevNo1.current&&prevNo1.current!==top.ticker){
+        setToast({ticker:top.ticker,name:top.name});
+        setTimeout(()=>setToast(null),6000);
+      }
+      prevNo1.current=top.ticker;
+    }
+  },[stocks]);
+
+  const loadAll=useCallback(async()=>{
+    setLoading(true);
+    // 1. Try live social trending from StockTwits
+    const social=await fetchSocialTrending();
+    const tickers=social?social.map(s=>s.ticker).slice(0,10):DEFAULT_WATCHLIST;
+    const mentionMap={};
+    if(social) social.forEach(s=>{if(s.mentions!==null) mentionMap[s.ticker]=s.mentions;});
+    setSocialLive(!!social);
+    setTrendSource(social?'StockTwits':'Default watchlist');
+    // 2. Fetch Finnhub quote+profile+metrics for each
+    const results=await Promise.allSettled(tickers.map(t=>fetchStock(t)));
+    const built=results.map((r,i)=>{
+      if(r.status!=='fulfilled')return null;
+      const {q,p,m}=r.value;
+      const price=q.c||q.pc||0;
+      if(!price)return null;
+      const s=buildStock(tickers[i],i+1,q,p,m);
+      if(mentionMap[tickers[i]]){s.mentions=mentionMap[tickers[i]];s.mentionsReal=true;}
+      return s;
+    }).filter(Boolean).sort((a,b)=>b.mentions-a.mentions).map((s,i)=>({...s,rank:i+1}));
+    // Detect market open (any stock has live c price > 0)
+    const open=results.some(r=>r.status==='fulfilled'&&r.value.q.c>0);
+    setMarketOpen(open);
+    setStocks(built);setLastUp(new Date());setCdown(REFRESH_SEC);
+    setLoading(false);
+  },[]);
+
+  const handleLookup=async()=>{
+    const ticker=q.trim().toUpperCase();
+    if(!ticker)return;
+    setSearching(true);setSearchErr('');
+    try{
+      const {q:qt,p,m}=await fetchStock(ticker);
+      const price=qt.c||qt.pc||0;
+      if(!price){setSearchErr(`"${ticker}" not found on Finnhub. Check the ticker symbol.`);setSearching(false);return;}
+      const s=buildStock(ticker,0,qt,p,m);
+      setStock(s);setQ('');
+    }catch(e){setSearchErr(`Could not fetch "${ticker}". Check the ticker symbol.`);}
+    setSearching(false);
+  };
+
+  useEffect(()=>{loadAll();},[loadAll]);
+  useEffect(()=>{
+    const t=setInterval(()=>setCdown(c=>{if(c<=1){loadAll();return REFRESH_SEC;}return c-1;}),1000);
+    return()=>clearInterval(t);
+  },[loadAll]);
+
+  const maxM=stocks[0]?.mentions||1;
+  const byS=sec==='All'?stocks:stocks.filter(s=>s.sector===sec);
+  const fil=q.trim()?byS.filter(s=>s.ticker.toLowerCase().includes(q.toLowerCase())||s.name.toLowerCase().includes(q.toLowerCase())):byS;
+  const noMatch=q.trim().length>=1&&fil.length===0;
+  const today=new Date().toLocaleDateString([],{month:'short',day:'numeric'}).toUpperCase();
+  const time=lastUp?lastUp.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'—';
+  const statusColor=marketOpen?'var(--gr)':'var(--go)';
+  const statusBg=marketOpen?'var(--grg)':'var(--gog)';
+  const statusBorder=marketOpen?'rgba(14,206,135,.3)':'rgba(245,158,11,.3)';
+  const statusLabel=loading?'LOADING…':marketOpen?'MARKET OPEN':'AFTER HOURS';
+
+  if(stock)return <Detail stock={stock} onBack={()=>setStock(null)}/>;
+  return <div className="dot" style={{minHeight:'100vh',display:'flex',flexDirection:'column',position:'relative'}}>
+    {/* 🔔 New #1 toast notification */}
+    {toast&&<div style={{position:'fixed',top:14,left:'50%',transform:'translateX(-50%)',zIndex:999,background:'linear-gradient(135deg,var(--ac),#0070f3)',color:'#000',borderRadius:10,padding:'10px 18px',fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:13,boxShadow:'0 4px 24px rgba(0,200,255,.35)',display:'flex',alignItems:'center',gap:8,animation:'fadeUp .3s ease',whiteSpace:'nowrap'}}>
+      🔔 NEW #1 &nbsp;<span style={{fontFamily:"'Space Mono',monospace"}}>{toast.ticker}</span>&nbsp;is now trending!
+      <button onClick={()=>setToast(null)} style={{marginLeft:4,fontSize:14,color:'#000',opacity:.6,fontWeight:700}}>×</button>
+    </div>}
+    <div style={{padding:'14px 13px 0',background:'linear-gradient(180deg,rgba(0,200,255,.06) 0%,transparent 100%)',borderBottom:'1px solid var(--br)'}}>
+      <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:14}}>
+        <div style={{display:'flex',alignItems:'center',gap:7,flex:1}}>
+          <div style={{width:32,height:32,borderRadius:8,background:'linear-gradient(135deg,var(--ac),#0070f3)',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,color:'#000',flexShrink:0}}>B</div>
+          <div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontSize:17,fontWeight:700,letterSpacing:'-.02em'}}>buzz<span style={{color:'var(--ac)'}}>stock</span></div>
+            <div style={{fontSize:8,color:'var(--t3)',fontFamily:"'Space Mono',monospace",letterSpacing:'.06em'}}>{socialLive?'🔥 StockTwits Trending':'📋 Default Watchlist'}</div>
+          </div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <div style={{padding:'4px 8px',borderRadius:6,background:statusBg,border:`1px solid ${statusBorder}`,display:'flex',alignItems:'center',gap:5}}>
+            <div style={{width:5,height:5,borderRadius:'50%',background:statusColor,animation:marketOpen?'blink 2s infinite':'none'}}/>
+            <span style={{fontSize:7,fontFamily:"'Space Mono',monospace",color:statusColor,fontWeight:700,whiteSpace:'nowrap'}}>{statusLabel}</span>
+            {!loading&&<span style={{fontSize:7,fontFamily:"'Space Mono',monospace",color:'var(--t3)'}}>:{String(countdown).padStart(2,'0')}</span>}
+          </div>
+          <button onClick={loadAll} style={{width:26,height:26,borderRadius:6,background:'var(--s2)',border:'1px solid var(--br)',color:'var(--t2)',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'}} title="Refresh">⟳</button>
+        </div>
+      </div>
+
+      {/* Search */}
+      <div style={{position:'relative',marginBottom:noMatch||searchErr?8:10}}>
+        <span style={{position:'absolute',left:12,top:'50%',transform:'translateY(-50%)',color:'var(--t3)',fontSize:15,pointerEvents:'none'}}>⌕</span>
+        <input value={q} onChange={e=>{setQ(e.target.value);setSearchErr('');}}
+          onKeyDown={e=>e.key==='Enter'&&(noMatch||q.trim().length>0&&!fil.length)&&handleLookup()}
+          placeholder="Search any ticker — ASML, SMCI, TSM, MSTR…"
+          style={{width:'100%',padding:'10px 13px 10px 36px',background:'var(--s1)',border:'1px solid var(--br)',borderRadius:8,color:'var(--t1)',fontSize:13}}
+          onFocus={e=>e.target.style.borderColor='var(--ac)'} onBlur={e=>e.target.style.borderColor='var(--br)'}/>
+      </div>
+      {noMatch&&!searchErr&&<div style={{marginBottom:10,display:'flex',alignItems:'center',gap:10,padding:'10px 13px',background:'var(--acg)',border:'1px solid rgba(0,200,255,.25)',borderRadius:8}}>
+        <span style={{fontSize:12,color:'var(--t2)',flex:1}}><span style={{color:'var(--ac)',fontFamily:"'Space Mono',monospace",fontWeight:700}}>{q.toUpperCase()}</span> not in trending list — fetch live from Finnhub?</span>
+        <button onClick={handleLookup} disabled={searching} style={{padding:'6px 14px',borderRadius:6,background:'var(--ac)',color:'#000',fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:11,whiteSpace:'nowrap',opacity:searching?0.6:1,flexShrink:0}}>{searching?'Loading…':'Look up'}</button>
+      </div>}
+      {searchErr&&<div style={{marginBottom:10,padding:'10px 13px',background:'var(--reg)',border:'1px solid rgba(244,63,94,.3)',borderRadius:8,fontSize:12,color:'var(--re)'}}>{searchErr}</div>}
+
+      {/* Market status bar */}
+      {!loading&&<div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
+        <span style={{fontFamily:"'Syne',sans-serif",fontSize:10,fontWeight:700,color:'var(--t2)',letterSpacing:'.1em'}}>🔥 MOST BUZZED</span>
+        <span style={{fontSize:10,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>· {time}</span>
+        {!marketOpen&&<span style={{fontSize:9,color:'var(--go)',fontFamily:"'Space Mono',monospace",background:'var(--gog)',padding:'1px 6px',borderRadius:4}}>PREV CLOSE — Live resumes market open</span>}
+        <span style={{marginLeft:'auto',fontSize:9,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>↻ {countdown}s</span>
+      </div>}
+
+      {stocks.length>0&&<Pills stocks={stocks} sel={sec} onSel={s=>{setSec(s);setQ('');}}/>}
+    </div>
+
+    <div style={{padding:'8px 10px 0',flex:1}}>
+      {loading&&stocks.length===0
+        ?<div style={{display:'flex',flexDirection:'column',alignItems:'center',padding:'48px 0',gap:14}}>
+            <div style={{width:28,height:28,border:'2px solid var(--br2)',borderTopColor:'var(--ac)',borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
+            <div style={{fontSize:11,color:'var(--t3)',fontFamily:"'Space Mono',monospace"}}>Fetching trending stocks from StockTwits…</div>
+          </div>
+        :fil.length===0&&!noMatch
+          ?<div style={{textAlign:'center',padding:'36px 0',color:'var(--t3)',fontSize:12}}>No stocks in this sector.</div>
+          :fil.map((s,i)=><Row key={s.ticker} s={s} maxM={maxM} delay={i*.04} onSel={setStock}/>)
+      }
+    </div>
+    <div style={{borderTop:'1px solid var(--br)',padding:'10px 13px',background:'var(--s1)',fontSize:9,color:'var(--t3)',textAlign:'center',fontFamily:"'Space Mono',monospace"}}>
+      Trending via StockTwits · Prices via Finnhub · Auto-refresh {REFRESH_SEC}s · Personal use
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
